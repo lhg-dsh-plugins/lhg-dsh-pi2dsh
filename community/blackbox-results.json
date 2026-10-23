@@ -1,0 +1,2186 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-14T09:15:30.043Z",
+  "method": "convert + real DSH runtime load (Cordis composition with official service plugins); registration surfaces recorded; failures classified as ABI gaps; representative tools/commands EXECUTED with schema-derived arguments against local fixtures",
+  "hostBaseline": {
+    "tools": [],
+    "commands": [
+      "login"
+    ]
+  },
+  "counts": {
+    "loaded": 48,
+    "loadFailed": 2,
+    "fatal": 0
+  },
+  "exerciseCounts": {
+    "working": 41,
+    "executed-input-validation": 6,
+    "nothing-exercisable": 1
+  },
+  "gapHistogram": {
+    "other": 2
+  },
+  "results": [
+    {
+      "rank": 1,
+      "name": "pi-mcp-adapter",
+      "downloadsPerMonth": 354400,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "mcp",
+        "mcpScript"
+      ],
+      "commands": [
+        "mcp",
+        "mcp-auth"
+      ],
+      "skills": [
+        "mcp-scripting"
+      ],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "mcp",
+            "args": {},
+            "outcome": "working",
+            "evidence": "MCP: 1/1 servers, 1 tools\n\n✓ pi2dsh-fixture (1 tools)\n\nmcp({ server: \"name\" }) to list tools, mcp({ search: \"...\" }) to search"
+          },
+          {
+            "kind": "tool",
+            "name": "mcpScript",
+            "args": {
+              "code": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "ReferenceError: pi2dsh is not defined"
+          }
+        ]
+      },
+      "degraded": [
+        "ctx.reload"
+      ]
+    },
+    {
+      "rank": 2,
+      "name": "@vigolium/piolium",
+      "downloadsPerMonth": 231200,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "piolium-balanced",
+        "piolium-confirm",
+        "piolium-deep",
+        "piolium-diff",
+        "piolium-export",
+        "piolium-help",
+        "piolium-knowledge-base",
+        "piolium-learn",
+        "piolium-lite",
+        "piolium-longshot",
+        "piolium-merge",
+        "piolium-reinvest",
+        "piolium-resume",
+        "piolium-revisit",
+        "piolium-smoke",
+        "piolium-status"
+      ],
+      "skills": [
+        "agentic-actions-auditor",
+        "audit",
+        "code-reviewer",
+        "codeql",
+        "differential-review",
+        "fp-check",
+        "insecure-defaults",
+        "last30days",
+        "sarif-parsing",
+        "security-threat-model",
+        "semgrep",
+        "semgrep-rule-creator",
+        "semgrep-rule-variant-creator",
+        "sharp-edges",
+        "spec-to-code-compliance",
+        "supply-chain-risk-auditor",
+        "variant-analysis",
+        "vuln-report",
+        "wooyun-legacy",
+        "zeroize-audit"
+      ],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "piolium-balanced",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:DefaultResourceLoader)",
+        "host-import(@earendil-works/pi-coding-agent:createAgentSession)",
+        "host-import(@earendil-works/pi-ai:calculateCost)",
+        "host-import(@earendil-works/pi-ai:createAssistantMessageEventStream)",
+        "theme"
+      ]
+    },
+    {
+      "rank": 3,
+      "name": "pi-web-access",
+      "downloadsPerMonth": 222000,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "fetch_content",
+        "get_search_content",
+        "source_check",
+        "web_search"
+      ],
+      "commands": [
+        "curator",
+        "google-account",
+        "search",
+        "websearch"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "fetch_content",
+            "args": {},
+            "outcome": "working",
+            "evidence": "Error: No URL provided."
+          },
+          {
+            "kind": "tool",
+            "name": "get_search_content",
+            "args": {
+              "responseId": "pi2dsh-probe"
+            },
+            "outcome": "working",
+            "evidence": "Error: No stored results for \"pi2dsh-probe\""
+          },
+          {
+            "kind": "tool",
+            "name": "source_check",
+            "args": {
+              "claim": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "# Source check: pi2dsh\n\n**Status:** missing-evidence (confidence 0.20)\n**Rationale:** No passages available that discuss the claim's terms.\n\n## Sources\n1. [unkn"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 4,
+      "name": "@juicesharp/rpiv-ask-user-question",
+      "downloadsPerMonth": 51600,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "ask_user_question"
+      ],
+      "commands": [],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "ask_user_question",
+            "args": {
+              "questions": []
+            },
+            "outcome": "working",
+            "evidence": "Error: At least one question is required"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 5,
+      "name": "@juicesharp/rpiv-todo",
+      "downloadsPerMonth": 43100,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "todo"
+      ],
+      "commands": [
+        "todos"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "todo",
+            "args": {
+              "action": "create"
+            },
+            "outcome": "working",
+            "evidence": "Error: subject required for create"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 6,
+      "name": "pi-lens",
+      "downloadsPerMonth": 40900,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "ast_grep_dump",
+        "ast_grep_outline",
+        "ast_grep_replace",
+        "ast_grep_search",
+        "lens_diagnostic_mark",
+        "lens_diagnostics",
+        "lsp_diagnostics",
+        "lsp_navigation",
+        "module_report",
+        "pi_lens_activate_tools",
+        "project_report",
+        "read_enclosing",
+        "read_symbol",
+        "symbol_search"
+      ],
+      "commands": [
+        "lens-allow-edit",
+        "lens-context-toggle",
+        "lens-health",
+        "lens-map",
+        "lens-perf",
+        "lens-tdi",
+        "lens-toggle",
+        "lens-tools",
+        "lens-widget-toggle"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "ast_grep_dump",
+            "args": {
+              "source": "pi2dsh",
+              "lang": "bash"
+            },
+            "outcome": "working",
+            "evidence": "program [1,1] - [1,7] \"pi2dsh\"\n  command [1,1] - [1,7] \"pi2dsh\"\n    name: command_name [1,1] - [1,7] \"pi2dsh\"\n      word [1,1] - [1,7] \"pi2dsh\""
+          },
+          {
+            "kind": "tool",
+            "name": "ast_grep_outline",
+            "args": {
+              "paths": [
+                "/var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/workspace/sample.txt"
+              ]
+            },
+            "outcome": "working",
+            "evidence": "No outline items found (syntax-only — try module_report, or check lang/paths)."
+          },
+          {
+            "kind": "tool",
+            "name": "ast_grep_replace",
+            "args": {
+              "pattern": "pi2dsh",
+              "rewrite": "pi2dsh",
+              "lang": "bash"
+            },
+            "outcome": "working",
+            "evidence": "[DRY-RUN] No matches found."
+          }
+        ]
+      },
+      "degraded": [
+        "ctx.startsWith",
+        "ctx.toLowerCase",
+        "ctx.args",
+        "ctx.command",
+        "ctx.depth",
+        "ctx.compact",
+        "ctx.fileRole",
+        "ctx.id",
+        "ctx.method",
+        "ctx.error",
+        "ctx.result",
+        "ctx.isCancellationRequested",
+        "ctx.onCancellationRequested",
+        "ctx.dispose",
+        "ctx.listen",
+        "ctx.onClose",
+        "ctx.onError",
+        "ctx.onPartialMessage",
+        "ctx.write",
+        "ctx.cancelUndispatched",
+        "ctx.createCancellationTokenSource",
+        "ctx.kind",
+        "ctx.cleanup",
+        "ctx.sendCancellation",
+        "ctx.receiver",
+        "ctx.sender",
+        "ctx.handleMessage",
+        "ctx.cancellationStrategy",
+        "ctx.connectionStrategy",
+        "ctx.maxParallelism",
+        "ctx.messageStrategy",
+        "ctx.addListener",
+        "ctx.read",
+        "ctx.filePath",
+        "ctx.name",
+        "ctx.endLine",
+        "ctx.startLine",
+        "ctx.endPosition",
+        "ctx.startPosition",
+        "ctx.fileSignatures",
+        "ctx.normalizedChanged",
+        "ctx.facts",
+        "ctx.normalizedCwd",
+        "ctx.signature",
+        "ctx.seqAtBuildStart",
+        "ctx.ignoredIds",
+        "ctx.pi",
+        "ctx.argsPrefix",
+        "ctx.cmd",
+        "ctx.log",
+        "ctx.deltaMode",
+        "ctx.projectRoot",
+        "ctx.hasTool",
+        "ctx.blockingOnly",
+        "ctx.key",
+        "ctx.modifiedRanges",
+        "ctx.projectConfig",
+        "ctx.telemetry",
+        "ctx.seqState",
+        "ctx.wordIndex",
+        "ctx.onWordIndexUpdated",
+        "ctx.local",
+        "ctx.line",
+        "ctx.node",
+        "ctx.callName",
+        "on(resources_discover)",
+        "on(context)"
+      ]
+    },
+    {
+      "rank": 7,
+      "name": "@tintinweb/pi-subagents",
+      "downloadsPerMonth": 40700,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "Agent",
+        "get_subagent_result",
+        "steer_subagent"
+      ],
+      "commands": [
+        "agents"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "Agent",
+            "args": {
+              "prompt": "pi2dsh exercise probe",
+              "description": "pi2dsh exercise probe",
+              "subagent_type": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "Note: Unknown agent type \"pi2dsh\" — using general-purpose.\n\nAgent failed: pi2dsh: subagent creation needs the DSH host loop (model runtime) to provide the agent"
+          },
+          {
+            "kind": "tool",
+            "name": "get_subagent_result",
+            "args": {
+              "agent_id": "pi2dsh-probe"
+            },
+            "outcome": "working",
+            "evidence": "Agent not found: \"pi2dsh-probe\". It may have been cleaned up."
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:createAgentSession)",
+        "host-import(@earendil-works/pi-coding-agent:DefaultResourceLoader)",
+        "host-import(@earendil-works/pi-coding-agent:createCodingTools)",
+        "host-import(@earendil-works/pi-coding-agent:createReadOnlyTools)"
+      ]
+    },
+    {
+      "rank": 8,
+      "name": "@ff-labs/pi-fff",
+      "downloadsPerMonth": 31100,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "fffind",
+        "ffgrep"
+      ],
+      "commands": [
+        "fff-health",
+        "fff-mode",
+        "fff-rescan"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "fffind",
+            "args": {
+              "pattern": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "No files found matching pattern"
+          },
+          {
+            "kind": "tool",
+            "name": "ffgrep",
+            "args": {
+              "pattern": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "mcp-fixture-server.mjs\n 12: serverInfo: { name: 'pi2dsh-fixture', version: '0.0.0' },\n 17: description: 'Echo back the given text (pi2dsh black-box fixture).',\n"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 9,
+      "name": "pi-simplify",
+      "downloadsPerMonth": 30800,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "simplify"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "simplify",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 10,
+      "name": "@narumitw/pi-goal",
+      "downloadsPerMonth": 30200,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "goal_blocked",
+        "goal_complete",
+        "goal_wait"
+      ],
+      "commands": [
+        "goal"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "goal_blocked",
+            "args": {
+              "goal_id": "pi2dsh-probe",
+              "reason": "pi2dsh",
+              "evidence": "pi2dsh",
+              "repeated_turns": 1
+            },
+            "outcome": "working",
+            "evidence": "goal_blocked rejected: no active goal."
+          },
+          {
+            "kind": "tool",
+            "name": "goal_complete",
+            "args": {
+              "goal_id": "pi2dsh-probe",
+              "summary": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "Goal completion rejected: no active goal."
+          },
+          {
+            "kind": "tool",
+            "name": "goal_wait",
+            "args": {
+              "goal_id": "pi2dsh-probe",
+              "reason": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "goal_wait rejected: no active goal."
+          }
+        ]
+      },
+      "degraded": [
+        "on(context)"
+      ]
+    },
+    {
+      "rank": 11,
+      "name": "pi-goal-list-loop-audit",
+      "downloadsPerMonth": 28500,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "complete_goal",
+        "complete_task",
+        "list_activate",
+        "list_add",
+        "list_status",
+        "pause_goal",
+        "propose_goal_draft",
+        "propose_loop_draft",
+        "propose_loop_refine",
+        "propose_task_list",
+        "update_task_status"
+      ],
+      "commands": [
+        "glla",
+        "goal",
+        "goal-loop-continuation",
+        "goal-loop-draft",
+        "goal-loop-forever",
+        "goal-loop-forever-draft",
+        "goal-loop-forever-metricless",
+        "list",
+        "loop",
+        "review"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "complete_goal",
+            "args": {},
+            "outcome": "working",
+            "evidence": "This tool changes goal/loop/list state, which only the MAIN session owns — you are running in a subagent session. Report back to the main agent; it owns the goa"
+          },
+          {
+            "kind": "tool",
+            "name": "complete_task",
+            "args": {
+              "id": "pi2dsh-probe"
+            },
+            "outcome": "working",
+            "evidence": "This tool changes goal/loop/list state, which only the MAIN session owns — you are running in a subagent session. Report back to the main agent; it owns the goa"
+          },
+          {
+            "kind": "tool",
+            "name": "list_activate",
+            "args": {
+              "n": 1
+            },
+            "outcome": "working",
+            "evidence": "This tool changes goal/loop/list state, which only the MAIN session owns — you are running in a subagent session. Report back to the main agent; it owns the goa"
+          }
+        ]
+      },
+      "degraded": [
+        "trim"
+      ]
+    },
+    {
+      "rank": 12,
+      "name": "pi-fabric",
+      "downloadsPerMonth": 28300,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "fabric_exec"
+      ],
+      "commands": [
+        "fabric"
+      ],
+      "skills": [
+        "fabric-advisor",
+        "fabric-ambient",
+        "fabric-council",
+        "fabric-exec",
+        "fabric-fusion",
+        "fabric-guide",
+        "fabric-rlm",
+        "fabric-schema",
+        "fabric-spec",
+        "fabric-supervisor",
+        "fabric-swarm",
+        "fabric-workflow"
+      ],
+      "exercised": {
+        "grade": "executed-input-validation",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "fabric_exec",
+            "args": {
+              "code": "pi2dsh"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: Type errors; code was not executed:\nLine 1:1 — Cannot find name 'pi2dsh'."
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:wrapRegisteredTool)",
+        "host-import(@earendil-works/pi-coding-agent:createBashToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createEditToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createFindToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createGrepToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createLsToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createReadToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createWriteToolDefinition)",
+        "ctx.state",
+        "ctx.executionStarted",
+        "ctx.isPartial",
+        "ctx.invalidate",
+        "ctx.lastComponent",
+        "ctx.isError",
+        "on(<dynamic>)",
+        "host-import(@earendil-works/pi-coding-agent:ExtensionRunner)",
+        "host-import(@earendil-works/pi-coding-agent:formatSkillsForPrompt)",
+        "ctx.expanded",
+        "ctx.args",
+        "on(resources_discover)",
+        "on(context)"
+      ]
+    },
+    {
+      "rank": 13,
+      "name": "@gotgenes/pi-permission-system",
+      "downloadsPerMonth": 27000,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "permission-system"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "permission-system",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "on(resources_discover)"
+      ]
+    },
+    {
+      "rank": 14,
+      "name": "pi-background-tasks",
+      "downloadsPerMonth": 26900,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "bg_delegate",
+        "bg_kill",
+        "bg_logs",
+        "bg_result",
+        "bg_run",
+        "bg_run_pi_attested",
+        "bg_status",
+        "fusion_investigate",
+        "fusion_reason",
+        "fusion_research",
+        "fusion_validate"
+      ],
+      "commands": [
+        "bg",
+        "bg-clear",
+        "bg-tasks",
+        "bg-update",
+        "claude-cache",
+        "fusion",
+        "fusion-models",
+        "jobs",
+        "kill",
+        "logs",
+        "tasks"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "executed-input-validation",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "bg_delegate",
+            "args": {
+              "name": "pi2dsh-probe",
+              "prompt": "pi2dsh exercise probe"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: bg_delegate cannot pin a route: the parent session has no current model and no explicit route was given. No child was created."
+          },
+          {
+            "kind": "tool",
+            "name": "bg_logs",
+            "args": {
+              "taskId": "pi2dsh-probe"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: Unknown background task ID: pi2dsh-probe"
+          },
+          {
+            "kind": "tool",
+            "name": "bg_result",
+            "args": {
+              "taskId": "pi2dsh-probe"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: bg_result does not know task pi2dsh-probe: Unknown background task ID: pi2dsh-probe"
+          }
+        ]
+      },
+      "degraded": [
+        "on(before_provider_request)"
+      ]
+    },
+    {
+      "rank": 15,
+      "name": "pi-hermes-memory",
+      "downloadsPerMonth": 23700,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "memory_add",
+        "memory_remove",
+        "memory_replace",
+        "memory_search",
+        "session_search",
+        "skill_manage"
+      ],
+      "commands": [
+        "learn-memory-tool",
+        "memory-consolidate",
+        "memory-index-sessions",
+        "memory-insights",
+        "memory-interview",
+        "memory-pin",
+        "memory-preview-context",
+        "memory-skills",
+        "memory-switch-project",
+        "memory-sync-markdown"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "memory_add",
+            "args": {
+              "target": "memory",
+              "content": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "{\"success\":true,\"target\":\"memory\",\"usage\":\"1% — 66/5000 chars\",\"entry_count\":1,\"message\":\"Entry added.\"}"
+          },
+          {
+            "kind": "tool",
+            "name": "memory_replace",
+            "args": {
+              "target": "memory",
+              "old_text": "pi2dsh exercise probe",
+              "content": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "{\"success\":true,\"target\":\"memory\",\"usage\":\"1% — 66/5000 chars\",\"entry_count\":1,\"message\":\"Entry replaced.\"}"
+          },
+          {
+            "kind": "tool",
+            "name": "memory_search",
+            "args": {
+              "query": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "Found 1 memories matching \"pi2dsh exercise probe\":\n\n🧠 [global] pi2dsh exercise probe\n   Created: 2026-08-14 | Last used: 2026-08-14"
+          }
+        ]
+      },
+      "degraded": [
+        "on(resources_discover)"
+      ]
+    },
+    {
+      "rank": 16,
+      "name": "@mjasnikovs/pi-task",
+      "downloadsPerMonth": 22500,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "pi-worker",
+        "pi-worker-docs",
+        "pi-worker-fetch",
+        "pi-worker-search"
+      ],
+      "commands": [
+        "remote",
+        "task",
+        "task-auto",
+        "task-auto-cancel",
+        "task-auto-resume",
+        "task-cancel",
+        "task-config",
+        "task-list",
+        "task-plan",
+        "task-resume"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "pi-worker",
+            "args": {
+              "prompt": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "Workspace probe complete. Here's what I found:\n\n**Files in the workspace:**\n- `sample.ts` — `export const probe = 1`\n- `sample.txt` — \"pi2dsh exercise probe fil"
+          },
+          {
+            "kind": "tool",
+            "name": "pi-worker-docs",
+            "args": {
+              "module": "pi2dsh",
+              "query": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "[VERSION — verify] \"pi2dsh\" is not declared in this project's package.json, so this answer is based on npm latest (v0.2.0). Your project may target a different "
+          },
+          {
+            "kind": "tool",
+            "name": "pi-worker-fetch",
+            "args": {
+              "url": "http://127.0.0.1:55735/page",
+              "query": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "WARNING: cited excerpt not found verbatim in source content — the child pi may have paraphrased or hallucinated.\n\n\n\nThe page indicates the probe result: PI2DSH_"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:DefaultPackageManager)",
+        "ctx.newSession",
+        "ctx.compact",
+        "on(before_provider_request)",
+        "on(after_provider_response)"
+      ]
+    },
+    {
+      "rank": 17,
+      "name": "@narumitw/pi-plan-mode",
+      "downloadsPerMonth": 19200,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "plan_mode_complete",
+        "plan_mode_question"
+      ],
+      "commands": [
+        "plan"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "plan_mode_complete",
+            "args": {
+              "plan": "pi2dsh"
+            },
+            "outcome": "failed",
+            "evidence": "Error: plan_mode_complete is only available while Plan mode is active"
+          },
+          {
+            "kind": "tool",
+            "name": "plan_mode_question",
+            "args": {
+              "questions": []
+            },
+            "outcome": "working",
+            "evidence": "{\n  \"cancelled\": true,\n  \"reason\": \"plan_mode_inactive\",\n  \"message\": \"Error: plan_mode_question is only available while Plan mode is active.\"\n}"
+          }
+        ]
+      },
+      "degraded": [
+        "ctx.newSession",
+        "on(context)"
+      ]
+    },
+    {
+      "rank": 18,
+      "name": "pi-powerline-footer",
+      "downloadsPerMonth": 17500,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "bash-mode",
+        "bash-reset",
+        "cd",
+        "powerline",
+        "powerline-perf",
+        "queue",
+        "stash-history",
+        "vibe"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "bash-mode",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "ctx.switchSession",
+        "ctx.settingsManager",
+        "ctx.compact",
+        "ctx.userPrompt",
+        "ctx.theme"
+      ]
+    },
+    {
+      "rank": 19,
+      "name": "@juicesharp/rpiv-voice",
+      "downloadsPerMonth": 17200,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "voice"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "voice",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 20,
+      "name": "@howaboua/pi-codex-conversion",
+      "downloadsPerMonth": 16500,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "apply_patch",
+        "exec",
+        "exec_command",
+        "imagegen",
+        "view_image",
+        "wait",
+        "web_run",
+        "write_stdin"
+      ],
+      "commands": [
+        "codex"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "exec",
+            "args": {
+              "code": "pi2dsh"
+            },
+            "outcome": "timed-out",
+            "evidence": "still executing when the 20s probe timeout aborted it (Error: failed to download https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-code-mode-host-aarch64-a)"
+          },
+          {
+            "kind": "tool",
+            "name": "exec_command",
+            "args": {
+              "cmd": "echo pi2dsh-exercise"
+            },
+            "outcome": "working",
+            "evidence": "Command: echo pi2dsh-exercise\nChunk ID: a0bd86\nWall time: 0.0010 seconds\nProcess exited with code 1\nOriginal token count: 13\nOutput:\nexec_bridge binary is not b"
+          },
+          {
+            "kind": "tool",
+            "name": "imagegen",
+            "args": {
+              "prompt": "pi2dsh exercise probe"
+            },
+            "outcome": "failed",
+            "evidence": "Error: imagegen requires an image-capable OpenAI Codex-compatible Responses provider"
+          }
+        ]
+      },
+      "degraded": [
+        "on(before_provider_request)",
+        "on(context)",
+        "host-import(@earendil-works/pi-ai:createAssistantMessageEventStream)",
+        "host-import(@earendil-works/pi-ai:appendAssistantMessageDiagnostic)",
+        "host-import(@earendil-works/pi-ai:createAssistantMessageDiagnostic)",
+        "host-import(@earendil-works/pi-ai:calculateCost)"
+      ]
+    },
+    {
+      "rank": 21,
+      "name": "@narumitw/pi-lsp",
+      "downloadsPerMonth": 16300,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "lsp_diagnostics",
+        "lsp_fix"
+      ],
+      "commands": [
+        "lsp"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "lsp_diagnostics",
+            "args": {},
+            "outcome": "working",
+            "evidence": "Skipped unavailable default LSP server(s): biome, ty, gopls, rubocop, elixir-ls, zls, csharp, fsharp, jdtls, kotlin-lsp, yaml-language-server, lua-language-serv"
+          },
+          {
+            "kind": "tool",
+            "name": "lsp_fix",
+            "args": {
+              "path": "/var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/workspace/sample.txt"
+            },
+            "outcome": "failed",
+            "evidence": "Error: No fix route supports /var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/workspace/sample.txt. Supported LSP servers are defined by "
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 22,
+      "name": "pi-readseek",
+      "downloadsPerMonth": 16100,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "readSeek_def",
+        "readSeek_digest",
+        "readSeek_edit",
+        "readSeek_grep",
+        "readSeek_refs",
+        "readSeek_rename",
+        "readSeek_search",
+        "readSeek_view",
+        "readSeek_write"
+      ],
+      "commands": [
+        "def",
+        "digest",
+        "edit",
+        "grep",
+        "refs",
+        "rename",
+        "search",
+        "view",
+        "write"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "executed-input-validation",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "readSeek_def",
+            "args": {
+              "name": "pi2dsh-probe"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: dyld[73747]: Library not loaded: /opt/homebrew/opt/libgit2/lib/libgit2.1.9.dylib Referenced from: <9E0827C4-A0DC-3E7F-83D4-50269E16762E> /private/var/fol"
+          },
+          {
+            "kind": "tool",
+            "name": "readSeek_digest",
+            "args": {
+              "path": "/var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/workspace/sample.txt"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: dyld[73749]: Library not loaded: /opt/homebrew/opt/libgit2/lib/libgit2.1.9.dylib Referenced from: <9E0827C4-A0DC-3E7F-83D4-50269E16762E> /private/var/fol"
+          },
+          {
+            "kind": "tool",
+            "name": "readSeek_grep",
+            "args": {
+              "pattern": "pi2dsh"
+            },
+            "outcome": "failed",
+            "evidence": "Error: ripgrep (rg) is not available and could not be downloaded"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:createGrepTool)"
+      ]
+    },
+    {
+      "rank": 23,
+      "name": "pi-hashline-edit-pro",
+      "downloadsPerMonth": 15700,
+      "status": "load-failed",
+      "stage": "load",
+      "gap": "other",
+      "error": "every Pi extension entry failed to load:\n- vendor/index.ts: ENOENT: no such file or directory, open '/private/var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/bundles/23-pi-hashline-edit-pro/vendor/prompts/read.md'"
+    },
+    {
+      "rank": 24,
+      "name": "@llblab/pi-telegram",
+      "downloadsPerMonth": 14300,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "telegram_attach",
+        "telegram_help",
+        "telegram_message"
+      ],
+      "commands": [
+        "telegram-connect",
+        "telegram-disconnect",
+        "telegram-setup",
+        "telegram-status"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "telegram_attach",
+            "args": {
+              "paths": [
+                "/var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/workspace/sample.txt"
+              ]
+            },
+            "outcome": "failed",
+            "evidence": "Error: Telegram direct delivery requires this Pi instance to own /telegram-connect or be registered with the Telegram multi-instance bus"
+          },
+          {
+            "kind": "tool",
+            "name": "telegram_help",
+            "args": {},
+            "outcome": "working",
+            "evidence": "--- TELEGRAM BRIDGE HELP ---\n\nHow to understand Telegram turns:\n- `[telegram|thread:name|from:user|guest:group]` marks Telegram origin and attributes.\n- `thread"
+          },
+          {
+            "kind": "tool",
+            "name": "telegram_message",
+            "args": {
+              "text": "pi2dsh exercise probe"
+            },
+            "outcome": "failed",
+            "evidence": "Error: Telegram direct delivery requires this Pi instance to own /telegram-connect or be registered with the Telegram multi-instance bus"
+          }
+        ]
+      },
+      "degraded": [
+        "ctx.compact"
+      ]
+    },
+    {
+      "rank": 25,
+      "name": "pi-agent-browser-native",
+      "downloadsPerMonth": 13800,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "agent_browser"
+      ],
+      "commands": [],
+      "skills": [],
+      "exercised": {
+        "grade": "executed-input-validation",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "agent_browser",
+            "args": {},
+            "outcome": "executed-input-validation",
+            "evidence": "Error: Provide exactly one of args, semanticAction, job, qa, sourceLookup, networkSourceLookup, or electron."
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 26,
+      "name": "pi-prompt-template-model",
+      "downloadsPerMonth": 13800,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "chain-prompts",
+        "prompt-tool"
+      ],
+      "skills": [
+        "prompt-template-authoring"
+      ],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "chain-prompts",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "ctx.navigateTree"
+      ]
+    },
+    {
+      "rank": 27,
+      "name": "pi-landstrip",
+      "downloadsPerMonth": 13700,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "bash",
+        "task"
+      ],
+      "commands": [
+        "agents",
+        "sandbox"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "executed-input-validation",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "bash",
+            "args": {
+              "command": "echo"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: ENOENT: no such file or directory, open '/private/var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/bundles/27-pi-landstrip/vendor/d"
+          },
+          {
+            "kind": "tool",
+            "name": "task",
+            "args": {
+              "description": "pi2dsh exercise probe",
+              "prompt": "pi2dsh exercise probe",
+              "subagent_type": "pi2dsh"
+            },
+            "outcome": "failed",
+            "evidence": "Error: Unknown subagent: pi2dsh"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:createBashToolDefinition)"
+      ]
+    },
+    {
+      "rank": 28,
+      "name": "pi-rtk-optimizer",
+      "downloadsPerMonth": 12900,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "rtk"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "rtk",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:isToolCallEventType)"
+      ]
+    },
+    {
+      "rank": 29,
+      "name": "pi-cc-extensions",
+      "downloadsPerMonth": 12000,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "write"
+      ],
+      "commands": [
+        "ccstyle",
+        "clear",
+        "context",
+        "exit"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "ccstyle",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "on(<dynamic>)",
+        "on(resources_discover)",
+        "ctx.newSession",
+        "ctx.shutdown",
+        "ctx.ui.requestRender",
+        "host-import(@earendil-works/pi-coding-agent:BranchSummaryMessageComponent)",
+        "host-import(@earendil-works/pi-coding-agent:CompactionSummaryMessageComponent)",
+        "host-import(@earendil-works/pi-coding-agent:SkillInvocationMessageComponent)",
+        "host-import(@earendil-works/pi-coding-agent:createWriteToolDefinition)",
+        "theme"
+      ]
+    },
+    {
+      "rank": 30,
+      "name": "@narumitw/pi-statusline",
+      "downloadsPerMonth": 11900,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "statusline"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "statusline",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 31,
+      "name": "pi-goosedump",
+      "downloadsPerMonth": 11600,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "goose_compact",
+        "goose_forget",
+        "goose_get",
+        "goose_grep",
+        "goose_memory_status",
+        "goose_recall",
+        "goose_remember",
+        "goose_search",
+        "goose_sessions"
+      ],
+      "commands": [
+        "goose-compact",
+        "goose-forget",
+        "goose-memory-status",
+        "goose-search",
+        "goose-sessions",
+        "goose-settings",
+        "goosedump-settings"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "goose_compact",
+            "args": {},
+            "outcome": "working",
+            "evidence": "Nothing to compact (session too small)."
+          },
+          {
+            "kind": "tool",
+            "name": "goose_forget",
+            "args": {
+              "target": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "Durable memory is disabled. Set goosedump.enableMemory to true in settings (or /goose-settings)."
+          },
+          {
+            "kind": "tool",
+            "name": "goose_get",
+            "args": {
+              "ids": [
+                "pi2dsh"
+              ]
+            },
+            "outcome": "working",
+            "evidence": "session is required for goose_get when no current session is available"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:findCutPoint)",
+        "ctx.compact",
+        "ctx.switchSession"
+      ]
+    },
+    {
+      "rank": 32,
+      "name": "pi-deepseek-search",
+      "downloadsPerMonth": 11100,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "web_search"
+      ],
+      "commands": [],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "web_search",
+            "args": {
+              "query": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "## What \"pi2dsh exercise probe\" refers to\n\n**pi2dsh** is a project that bridges the **Pi** extension ecosystem and the **DeepSeek Harness (DSH)** ecosystem — a "
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 33,
+      "name": "@narumitw/pi-btw",
+      "downloadsPerMonth": 10600,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "btw"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "btw",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-tui:TuiAltScreen)"
+      ]
+    },
+    {
+      "rank": 34,
+      "name": "pi-ask-user",
+      "downloadsPerMonth": 10400,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "ask_user"
+      ],
+      "commands": [],
+      "skills": [
+        "ask-user"
+      ],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "ask_user",
+            "args": {
+              "question": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "User answered: blackbox"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 35,
+      "name": "@juicesharp/rpiv-web-tools",
+      "downloadsPerMonth": 9876,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "web_fetch",
+        "web_search"
+      ],
+      "commands": [
+        "web-tools"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "web_fetch",
+            "args": {
+              "url": "http://127.0.0.1:55735/page"
+            },
+            "outcome": "failed",
+            "evidence": "Error: Refusing to fetch private/loopback address: 127.0.0.1"
+          },
+          {
+            "kind": "tool",
+            "name": "web_search",
+            "args": {
+              "query": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "**Search results for \"pi2dsh exercise probe\":**\n\n1. **pi2dsh exercise result**\n   http://127.0.0.1/result\n   PI2DSH_EXERCISE_OK"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 36,
+      "name": "pi-cursor-sdk",
+      "downloadsPerMonth": 9800,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "cursor_activate_skill",
+        "cursor_ask_question"
+      ],
+      "commands": [
+        "cursor-cloud",
+        "cursor-fast",
+        "cursor-http",
+        "cursor-local-resume-cleanup",
+        "cursor-mode",
+        "cursor-refresh-config",
+        "cursor-refresh-models",
+        "cursor-runtime",
+        "cursor-tools"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "executed-input-validation",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "cursor_activate_skill",
+            "args": {
+              "name": "pi2dsh-probe"
+            },
+            "outcome": "failed",
+            "evidence": "Error: Skill not available: pi2dsh-probe. Available skills: none."
+          },
+          {
+            "kind": "tool",
+            "name": "cursor_ask_question",
+            "args": {},
+            "outcome": "executed-input-validation",
+            "evidence": "Error: No valid question was provided."
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:createBashToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createEditToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createFindToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createGrepToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createLsToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createReadToolDefinition)",
+        "host-import(@earendil-works/pi-coding-agent:createWriteToolDefinition)",
+        "host-import(@earendil-works/pi-ai:createAssistantMessageEventStream)",
+        "host-import(@earendil-works/pi-coding-agent:parseArgs)",
+        "on(project_trust)"
+      ]
+    },
+    {
+      "rank": 37,
+      "name": "pi-provider-litellm",
+      "downloadsPerMonth": 9789,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "litellm_skill_create",
+        "litellm_skill_delete",
+        "litellm_skill_list"
+      ],
+      "commands": [],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "litellm_skill_create",
+            "args": {
+              "name": "pi2dsh-probe"
+            },
+            "outcome": "executed-input-validation",
+            "evidence": "Error: code is required when source is omitted"
+          },
+          {
+            "kind": "tool",
+            "name": "litellm_skill_list",
+            "args": {},
+            "outcome": "working",
+            "evidence": "- pi2dsh-fixture-skill: PI2DSH_EXERCISE_OK"
+          }
+        ]
+      },
+      "degraded": [
+        "on(after_provider_response)",
+        "on(before_provider_request)",
+        "host-import(@earendil-works/pi-ai:createProvider)"
+      ]
+    },
+    {
+      "rank": 38,
+      "name": "pi-zentui",
+      "downloadsPerMonth": 9594,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "zentui"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "zentui",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:ModelSelectorComponent)",
+        "ctx.bold"
+      ]
+    },
+    {
+      "rank": 39,
+      "name": "pi-interview",
+      "downloadsPerMonth": 9147,
+      "status": "load-failed",
+      "stage": "load",
+      "gap": "other",
+      "error": "every Pi extension entry failed to load:\n- vendor/index.ts: ENOENT: no such file or directory, open '/private/var/folders/6m/14zlftds6md1btml42wsbvl80000gp/T/pi2dsh-blackbox-iW6ihY/bundles/39-pi-interview/vendor/form/index.html'"
+    },
+    {
+      "rank": 40,
+      "name": "@alexanderfortin/pi-deepseek-usage",
+      "downloadsPerMonth": 8801,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [],
+      "skills": [],
+      "exercised": {
+        "grade": "nothing-exercisable",
+        "attempts": []
+      },
+      "degraded": [
+        "static-audit"
+      ]
+    },
+    {
+      "rank": 41,
+      "name": "pi-harness-runtime",
+      "downloadsPerMonth": 8787,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "github-login",
+        "harness-cancel",
+        "harness-pause",
+        "harness-resume",
+        "harness-start",
+        "harness-status",
+        "harness-tasks",
+        "reviewer",
+        "slash-commands",
+        "tencentdb",
+        "tencentdb-connect",
+        "tencentdb-setup",
+        "usage",
+        "usage-refresh",
+        "usage-reset",
+        "usage-today",
+        "usage-week",
+        "write-review",
+        "writer"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "github-login",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "ctx.compact",
+        "on(error)",
+        "on(message)"
+      ]
+    },
+    {
+      "rank": 42,
+      "name": "@ollama/pi-web-search",
+      "downloadsPerMonth": 8521,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "web_fetch",
+        "web_search"
+      ],
+      "commands": [],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "web_fetch",
+            "args": {
+              "url": "http://127.0.0.1:55735/page"
+            },
+            "outcome": "working",
+            "evidence": "Title: pi2dsh exercise page\n\nContent:\nPI2DSH_EXERCISE_OK\n\nLinks found: 0"
+          },
+          {
+            "kind": "tool",
+            "name": "web_search",
+            "args": {
+              "query": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "1. pi2dsh exercise result\n   URL: http://127.0.0.1:55735/page\n   PI2DSH_EXERCISE_OK"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 43,
+      "name": "pi-web-search",
+      "downloadsPerMonth": 8514,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "url_context",
+        "web_search"
+      ],
+      "commands": [],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "url_context",
+            "args": {
+              "query": "pi2dsh exercise probe",
+              "urls": [
+                "http://127.0.0.1:55735/page"
+              ]
+            },
+            "outcome": "working",
+            "evidence": "Failed: No current model selected for web search. Configure and select a supported provider: google-generative-ai, openai-responses, openai-codex-responses, ant"
+          },
+          {
+            "kind": "tool",
+            "name": "web_search",
+            "args": {
+              "query": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "Failed: No current model selected for web search. Configure and select a supported provider: google-generative-ai, openai-responses, openai-codex-responses, ant"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 44,
+      "name": "pi-mcp-extension",
+      "downloadsPerMonth": 8485,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "mcp_pi2dsh_fixture_fixture_echo"
+      ],
+      "commands": [
+        "mcp",
+        "mcp-auth",
+        "mcp-start",
+        "mcp-stop"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "mcp_pi2dsh_fixture_fixture_echo",
+            "args": {
+              "text": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "PI2DSH_EXERCISE_OK pi2dsh exercise probe"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 45,
+      "name": "@gotgenes/pi-subagents",
+      "downloadsPerMonth": 8460,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "get_subagent_result",
+        "steer_subagent",
+        "subagent"
+      ],
+      "commands": [
+        "subagents-sessions",
+        "subagents-settings"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "get_subagent_result",
+            "args": {
+              "agent_id": "pi2dsh-probe"
+            },
+            "outcome": "working",
+            "evidence": "Agent not found: \"pi2dsh-probe\". Records are cleared at session start/switch, so it may be from a previous session."
+          },
+          {
+            "kind": "tool",
+            "name": "subagent",
+            "args": {
+              "prompt": "pi2dsh exercise probe",
+              "description": "pi2dsh exercise probe",
+              "subagent_type": "pi2dsh"
+            },
+            "outcome": "working",
+            "evidence": "Note: Unknown agent type \"pi2dsh\" — using general-purpose.\n\nAgent failed: pi2dsh: subagent creation needs the DSH host loop (model runtime) to provide the agent"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:createAgentSession)",
+        "host-import(@earendil-works/pi-coding-agent:DefaultResourceLoader)",
+        "host-import(@earendil-works/pi-coding-agent:BashExecutionComponent)",
+        "host-import(@earendil-works/pi-coding-agent:BranchSummaryMessageComponent)",
+        "host-import(@earendil-works/pi-coding-agent:CompactionSummaryMessageComponent)",
+        "host-import(@earendil-works/pi-coding-agent:SkillInvocationMessageComponent)"
+      ]
+    },
+    {
+      "rank": 46,
+      "name": "pi-btw",
+      "downloadsPerMonth": 8436,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "btw",
+        "btw-clear",
+        "btw-inject",
+        "btw-model",
+        "btw-new",
+        "btw-summarize",
+        "btw-tangent",
+        "btw-thinking"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "btw",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@earendil-works/pi-coding-agent:createAgentSession)",
+        "host-import(@earendil-works/pi-coding-agent:createExtensionRuntime)",
+        "ctx.fg",
+        "ctx.italic",
+        "ctx.bold",
+        "ctx.bg",
+        "on(context)"
+      ]
+    },
+    {
+      "rank": 47,
+      "name": "@amaster.ai/pi-image-gen",
+      "downloadsPerMonth": 8204,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "image_generate"
+      ],
+      "commands": [
+        "image-gen"
+      ],
+      "skills": [
+        "image-gen"
+      ],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "image_generate",
+            "args": {
+              "prompt": "pi2dsh exercise probe"
+            },
+            "outcome": "working",
+            "evidence": "Generated 1 image(s) via fixture (custom) (pi2dsh-probe). Show each one to the user as inline markdown — copy the lines below verbatim into your reply:\n\n![pi2ds"
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 48,
+      "name": "pi-llama-cpp",
+      "downloadsPerMonth": 8193,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [],
+      "commands": [
+        "models"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "command",
+            "name": "models",
+            "outcome": "working",
+            "evidence": "command handler completed"
+          }
+        ]
+      },
+      "degraded": [
+        "on(before_provider_request)",
+        "host-import(@earendil-works/pi-tui:AutocompleteItem)",
+        "host-import(@earendil-works/pi-ai:ApiKeyCredential)",
+        "host-import(@earendil-works/pi-ai:ModelThinkingLevel)"
+      ]
+    },
+    {
+      "rank": 49,
+      "name": "@juicesharp/rpiv-advisor",
+      "downloadsPerMonth": 7851,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "advisor"
+      ],
+      "commands": [
+        "advisor"
+      ],
+      "skills": [],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "advisor",
+            "args": {},
+            "outcome": "working",
+            "evidence": "No advisor model is configured. The user can enable one with the /advisor command."
+          }
+        ]
+      },
+      "degraded": []
+    },
+    {
+      "rank": 50,
+      "name": "mitsupi",
+      "downloadsPerMonth": 7802,
+      "status": "loaded",
+      "verdict": "review",
+      "tools": [
+        "bash",
+        "edit",
+        "signal_loop_success",
+        "todo"
+      ],
+      "commands": [
+        "answer",
+        "btw",
+        "context",
+        "control-sessions",
+        "end-review",
+        "files",
+        "loop",
+        "mode",
+        "review",
+        "session-breakdown",
+        "split-fork",
+        "todos"
+      ],
+      "skills": [
+        "anachb",
+        "apple-mail",
+        "commit",
+        "frontend-design",
+        "ghidra",
+        "github",
+        "google-workspace",
+        "librarian",
+        "mermaid",
+        "native-web-search",
+        "oebb-scotty",
+        "openscad",
+        "pi-share",
+        "sentry",
+        "summarize",
+        "tmux",
+        "update-changelog",
+        "uv",
+        "web-browser"
+      ],
+      "exercised": {
+        "grade": "working",
+        "attempts": [
+          {
+            "kind": "tool",
+            "name": "bash",
+            "args": {
+              "command": "echo"
+            },
+            "outcome": "working",
+            "evidence": "\n"
+          },
+          {
+            "kind": "tool",
+            "name": "signal_loop_success",
+            "args": {},
+            "outcome": "working",
+            "evidence": "No active loop is running."
+          },
+          {
+            "kind": "tool",
+            "name": "todo",
+            "args": {
+              "action": "list"
+            },
+            "outcome": "working",
+            "evidence": "{\n  \"assigned\": [],\n  \"open\": [],\n  \"closed\": []\n}"
+          }
+        ]
+      },
+      "degraded": [
+        "host-import(@mariozechner/pi-ai:complete)",
+        "host-import(@mariozechner/pi-coding-agent:codingTools)",
+        "host-import(@mariozechner/pi-coding-agent:createAgentSession)",
+        "host-import(@mariozechner/pi-coding-agent:createExtensionRuntime)",
+        "ctx.fg",
+        "ctx.bold",
+        "on(session_switch)",
+        "on(session_fork)",
+        "host-import(@mariozechner/pi-coding-agent:compact)",
+        "host-import(@mariozechner/pi-coding-agent:ModelSelectorComponent)",
+        "ctx.navigateTree",
+        "host-import(@mariozechner/pi-tui:TUI)",
+        "host-import(@mariozechner/pi-coding-agent:createBashTool)",
+        "theme"
+      ]
+    }
+  ]
+}

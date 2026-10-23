@@ -1,0 +1,1049 @@
+#!/usr/bin/env node
+// Real-machine acceptance for the pi-subagents LIFECYCLE surfaces the P0 run
+// left open: steer / resume / stop / live-route inheritance / explicit child
+// model + per-child thinking. Stock stack, no mocks:
+//
+//   - CLI:      @deepseek-ai/dsh@0.1.1-rc.2 (npm, stock)
+//   - Engine:   this working tree (or PI2DSH_ENGINE_SPEC)
+//   - Plugin:   @tintinweb/pi-subagents (npm, stock)
+//   - Model:    real DeepSeek (parent AND child turns)
+//
+// Every assertion is falsifiable — it fails when the feature is broken:
+//
+//   steer:  the steered file's path+content exist ONLY in the steer message
+//           (never in the spawn prompt), and the parent is forbidden from
+//           running bash itself (asserted on its log) — so the file on disk
+//           can only mean the mid-run steer reached the child's model.
+//   resume: the codeword exists ONLY inside a file on disk (no prompt carries
+//           it). Turn 1 has the child read + memorize it; the resumed turn 2
+//           forbids reading and asks it to write the codeword from memory.
+//           Passing needs: recall file content matches, both turns live in the
+//           SAME child session log, and turn 2 made no read call.
+//   stop:   a foreground child runs `sleep N` then writes a file. The parent
+//           turn is interrupted (Esc in the stock TUI — the official
+//           parent-abort → child-stop wiring). The file must still be absent
+//           well after the sleep window — without a real stop it appears.
+//   model-follow: after a real TUI /model switch, an unpinned child must use
+//           the parent's last durable request route, not its creation seed.
+//   explicit-model-thinking: while the parent stays on work-gw, one child is
+//           explicitly pinned to deepseek-official with thinking=max. The
+//           child's durable request header must carry BOTH values and its
+//           real tool effect must land.
+//
+//   node scripts/verify-subagents-lifecycle-e2e.mjs [community/subagents-lifecycle-e2e.json]
+
+import { writeHostConfig, installedCoreVersions } from './lib/e2e-harness.mjs'
+import { execFile as execFileCallback } from 'node:child_process'
+import { spawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
+import { readFileSync, existsSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
+import { setTimeout as delay } from 'node:timers/promises'
+
+const execFile = promisify(execFileCallback)
+const projectRoot = resolve(new URL('..', import.meta.url).pathname)
+const outPath = resolve(process.argv[2] ?? 'community/subagents-lifecycle-e2e.json')
+
+const DSH_CLI_SPEC = process.env.PI2DSH_DSH_CLI_SPEC ?? '@deepseek-ai/dsh@0.2.1-rc.2'
+const ENGINE_SPEC = process.env.PI2DSH_ENGINE_SPEC ?? projectRoot
+const engineTarballSha256 = ENGINE_SPEC.startsWith('file:')
+  ? createHash('sha256').update(readFileSync(ENGINE_SPEC.slice(5))).digest('hex') : undefined
+const SUBAGENTS_SPEC = process.env.PI2DSH_SUBAGENTS_SPEC ?? '@tintinweb/pi-subagents@0.20.0'
+// Cross-restart reopen probe (public Pi ABI: createAgentSession + SessionManager.open).
+const PROBE_DIR = join(projectRoot, 'fixtures', 'subagent-archive-probe')
+const READINESS_PROBE = join(projectRoot, 'fixtures', 'subagent-readiness-probe')
+const RUN_TAG = Date.now().toString(36).toUpperCase()
+
+const log = message => console.log(`[subagents-lifecycle] ${message}`)
+
+const startedAt = new Date().toISOString()
+const scenarios = {}
+const modelOnly = process.env.PI2DSH_LIFECYCLE_ONLY === 'model-follow'
+const record = async status => {
+  await mkdir(resolve(outPath, '..'), { recursive: true })
+  await writeFile(outPath, `${JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    startedAt,
+    scenario: 'pi-subagents-lifecycle (steer / resume / stop / model-follow / explicit-model-thinking)',
+    cliSpec: DSH_CLI_SPEC,
+    engineSpec: ENGINE_SPEC,
+    engineTarballSha256,
+    subagentsSpec: SUBAGENTS_SPEC,
+    status,
+    selection: process.env.PI2DSH_LIFECYCLE_ONLY ?? 'all',
+    scenarios,
+  }, null, 2)}\n`)
+}
+
+function findDeepseekKey() {
+  if (process.env.DEEPSEEK_API_KEY) return process.env.DEEPSEEK_API_KEY
+  try {
+    const envFile = readFileSync(resolve(projectRoot, '..', 'deepseek-harness', '.env'), 'utf8')
+    const fromFile = /^\s*(?:export\s+)?DEEPSEEK_API_KEY=["']?([A-Za-z0-9_-]{20,})["']?\s*$/mu.exec(envFile)
+    if (fromFile) return fromFile[1]
+  } catch { /* skipped below */ }
+  return undefined
+}
+
+const apiKey = findDeepseekKey()
+if (apiKey === undefined) {
+  log('SKIPPED: no DeepSeek credential available')
+  scenarios.all = { status: 'skipped', reason: 'no DeepSeek credential; the lifecycle turns need a real model' }
+  await record('skipped')
+  process.exit(0)
+}
+
+const root = process.env.PI2DSH_SUBAGENTS_E2E_ROOT ?? await mkdtemp('/tmp/pi2dsh-subagents-lifecycle.')
+const home = join(root, 'dsh-home')
+const cliDir = resolve(process.env.PI2DSH_DSH_CWD ?? join(root, 'cli'))
+const workDir = join(root, 'workspace')
+await mkdir(workDir, { recursive: true })
+log(`scratch: ${root}`)
+
+const shimDir = join(root, 'bin')
+await mkdir(shimDir, { recursive: true })
+await writeFile(join(shimDir, 'pnpm'), '#!/bin/sh\nexec corepack pnpm@11.7.0 "$@"\n')
+await chmod(join(shimDir, 'pnpm'), 0o755)
+
+const baseEnv = {
+  ...process.env,
+  DEEPSEEK_API_KEY: apiKey,
+  DSH_HOME: home,
+  PI2DSH_READINESS_LOG: join(root, `readiness-${RUN_TAG}.jsonl`),
+  PATH: `${shimDir}:${process.env.PATH ?? ''}`,
+  CI: '1',
+  NO_COLOR: '1',
+  DSH_TELEMETRY_DISABLED: '1',
+  PNPM_CONFIG_MINIMUM_RELEASE_AGE: '0',
+  // Large tarballs (recheck-jar, 21MB) exceed pnpm's default 60s fetch
+  // timeout on a slow pipe; same harness property as the examples E2E.
+  PNPM_CONFIG_FETCH_TIMEOUT: '300000',
+  npm_config_registry: 'https://registry.npmjs.org',
+}
+
+async function sessionFiles(dir) {
+  const found = []
+  const walk = async current => {
+    let entries
+    try {
+      entries = await readdir(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const path = join(current, entry.name)
+      if (entry.isDirectory()) await walk(path)
+      else if (entry.name.endsWith('.jsonl')) found.push(path)
+    }
+  }
+  await walk(dir)
+  return found
+}
+
+function parseLines(text) {
+  const events = []
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue
+    try {
+      events.push(JSON.parse(line))
+    } catch { /* partial write */ }
+  }
+  return events
+}
+
+/** Load every session log, split parent (has Agent tool/call) from children. */
+async function loadSessions(marker) {
+  const out = []
+  for (const file of await sessionFiles(join(home, 'sessions'))) {
+    const raw = await readFile(file, 'utf8')
+    if (!raw.includes(marker)) continue
+    const events = parseLines(raw)
+    out.push({
+      file,
+      raw,
+      events,
+      isChild: events.some(event => event.type === 'subagent/descriptor'),
+      toolCalls: events.filter(event => event.type === 'tool/call'),
+      requestCount: events.filter(event => event.type === 'request/header').length,
+    })
+  }
+  return out
+}
+
+async function runHeadlessTurn(prompt, doneFile, deadlineMs) {
+  const child = spawn(join(cliDir, 'node_modules', '.bin', 'dsh'), ['--profile', 'headless', prompt], {
+    cwd: workDir, env: baseEnv, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let output = ''
+  child.stdout.on('data', chunk => { output += String(chunk) })
+  child.stderr.on('data', chunk => { output += String(chunk) })
+  const deadline = Date.now() + deadlineMs
+  while (child.exitCode === null && Date.now() < deadline) {
+    if (doneFile !== undefined && existsSync(doneFile)) break
+    await delay(2000)
+  }
+  // Let the parent finish narrating, then stop the process either way — the
+  // assertions read durable logs and the filesystem, never the screen.
+  for (let settle = 0; settle < 90 && child.exitCode === null; settle += 1) await delay(2000)
+  if (child.exitCode === null) child.kill('SIGTERM')
+  return output
+}
+
+try {
+  // ---- 1. stock CLI ------------------------------------------------------
+  const dshBin = join(cliDir, 'node_modules', '.bin', 'dsh')
+  if (!existsSync(join(cliDir, 'package.json'))) {
+    await mkdir(cliDir, { recursive: true })
+    await writeFile(join(cliDir, 'package.json'), `${JSON.stringify({
+      name: 'pi2dsh-subagents-lifecycle-cli',
+      private: true,
+      dependencies: { [DSH_CLI_SPEC.slice(0, DSH_CLI_SPEC.lastIndexOf('@'))]: DSH_CLI_SPEC.slice(DSH_CLI_SPEC.lastIndexOf('@') + 1) },
+    }, null, 2)}\n`)
+    await writeFile(join(cliDir, 'pnpm-workspace.yaml'), [
+      'minimumReleaseAge: 0',
+      'allowBuilds:',
+      "  '@deepseek-ai/dsh-subprocess-local': true",
+      '  node-pty: true',
+      '  koffi: true',
+      "  '@google/genai': false",
+      '  protobufjs: false',
+      '',
+    ].join('\n'))
+    log(`installing stock CLI ${DSH_CLI_SPEC} …`)
+    await execFile('corepack', ['pnpm@11.7.0', 'install'], { cwd: cliDir, env: baseEnv, timeout: 300_000 })
+  }
+  const cliVersion = JSON.parse(await readFile(join(cliDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8')).version
+
+  // ---- 2. profiles: engine + pi-subagents (headless and tui) -------------
+  for (const profile of ['headless', 'tui']) {
+    const profileRoot = join(home, 'profiles', profile)
+    if (!existsSync(join(profileRoot, 'node_modules', 'pi2dsh'))) {
+      log(`installing ${profile} profile …`)
+      // dsh-TUI 0.9.1+ drags pi-ai -> @google/genai -> protobufjs into the
+      // profile tree; their install scripts stay unrun, declared exactly as
+      // the CLI install dir above declares them. And since 2026-08-25 the
+      // official core packages' npm `latest` tag points at 0.0.1-rc.1, which
+      // broke pnpm's tag fallback for dsh-TUI's release-range core deps —
+      // the overrides pin every core package to the CLI's own generation,
+      // read from the CLI tree rather than a hand-copied list.
+      await mkdir(profileRoot, { recursive: true })
+      if (!existsSync(join(profileRoot, 'pnpm-workspace.yaml'))) {
+        const workspaceLines = [
+          // The 0.1.2 lines' `plugin add` forwards to raw pnpm, which
+          // refuses a workspace file without a packages field; their own
+          // initProfile writes exactly this. The rc lines ignore it.
+          'packages:',
+          '  - .',
+          'minimumReleaseAge: 0',
+          'allowBuilds:',
+          "  '@google/genai': false",
+          '  protobufjs: false',
+          '  esbuild: true',
+        ]
+        const core = installedCoreVersions(dshBin)
+        workspaceLines.push('overrides:')
+        for (const [name, version] of [...core.entries()].sort()) workspaceLines.push(`  "${name}": ${version}`)
+        await writeFile(join(profileRoot, 'pnpm-workspace.yaml'), `${workspaceLines.join('\n')}\n`)
+      }
+      // -w on every add: the 0.1.2 lines' raw-pnpm passthrough demands it
+      // (ERR_PNPM_ADDING_TO_ROOT without), and the rc lines tolerate it —
+      // the tui profile has shipped the flag on rc for weeks.
+      // TUI spec follows npm latest by default — a hardcoded 0.9.0 pin quietly
+      // mixed an rc-era TUI into alpha profiles (its mount dies, the tmux
+      // session exits, and capture-pane reports 'no server running'). Pin
+      // explicitly via PI2DSH_TUI_SPEC when back-testing an old combination.
+      const extra = profile === 'tui' ? ['-w', process.env.PI2DSH_TUI_SPEC ?? '@deepseek-harness-tui/dsh-tui'] : ['-w']
+      const probe = profile === 'headless' ? [PROBE_DIR] : []
+      await execFile(dshBin, ['plugin', '--profile', profile, 'add', ...extra, ENGINE_SPEC, SUBAGENTS_SPEC, ...probe], {
+        env: baseEnv, timeout: 600_000, maxBuffer: 32 * 1024 * 1024,
+      })
+    } else if (profile === 'headless' && !existsSync(join(profileRoot, 'node_modules', '@pi2dsh-fixtures', 'subagent-archive-probe'))) {
+      // A reused scratch predating the probe: add it in place.
+      await execFile(dshBin, ['plugin', '--profile', profile, 'add', '-w', PROBE_DIR], {
+        env: baseEnv, timeout: 600_000, maxBuffer: 32 * 1024 * 1024,
+      })
+    }
+    await writeFile(join(profileRoot, 'cordis.patch.yml'), [
+      '- id: session-persistence-jsonl',
+      '  config:',
+      "    root: !!js dshHomePath('sessions')",
+      '    compression: none',
+      '',
+    ].join('\n'))
+  }
+  await execFile(dshBin, ['plugin', '--profile', 'headless', 'add', '-w', READINESS_PROBE], {
+    env: baseEnv, timeout: 600_000, maxBuffer: 16 * 1024 * 1024,
+  })
+  const engineVersion = JSON.parse(await readFile(join(home, 'profiles', 'headless', 'node_modules', 'pi2dsh', 'package.json'), 'utf8')).version
+  log(`stock stack: cli ${cliVersion}, engine ${engineVersion}`)
+
+  // A second REAL route for the model-follow scenario: an llm-pi-ai alias of
+  // the same DeepSeek endpoint (same key, same wire — only the route name
+  // differs). No mock: requests through it are real model calls.
+  await writeHostConfig(home, [
+    'llm-pi-ai:',
+    '  providers:',
+    '    work-gw:',
+    '      displayName: Work Gateway',
+    '      api: openai-completions',
+    '      baseURL: https://api.deepseek.com/v1',
+    '      apiKeyEnv: DEEPSEEK_API_KEY',
+    '      models:',
+    '        - id: deepseek-flash',
+    '          name: Work Gateway Model',
+    '          contextWindow: 131072',
+    '',
+  ].join('\n'))
+
+  // ======================================================================
+  // Scenario 1 — steer: a mid-run steer_subagent reaches the child model.
+  // ======================================================================
+  if (!modelOnly) {
+    const STEER_TAG = `STEER_${RUN_TAG}`
+    const steeredPath = join(workDir, `steered-${RUN_TAG}.txt`)
+    const alphaPath = join(workDir, `alpha-${RUN_TAG}.txt`)
+    await rm(steeredPath, { force: true })
+    await rm(alphaPath, { force: true })
+    // The steered file's name and content live ONLY in the steer text.
+    const spawnTask = [
+      `First run the bash command \`sleep 25\`. When it finishes, write the file ${alphaPath}`,
+      `with the single word ALPHA_${RUN_TAG} using bash, then reply done.`,
+    ].join(' ')
+    const steerText = [
+      `URGENT change of plan: do NOT write the alpha file. Instead run exactly one bash command that writes`,
+      `the single word ${STEER_TAG} into ${steeredPath}, then finish immediately.`,
+    ].join(' ')
+    const prompt = [
+      `Do these steps in order and do not run bash or write any file yourself — only the subagent may.`,
+      `Step 1: call the Agent tool once: subagent_type general-purpose, name "writer", run_in_background true,`,
+      `prompt: "${spawnTask}".`,
+      `Step 2: immediately call steer_subagent with agent "writer" and message: "${steerText}".`,
+      `Step 3: call get_subagent_result with agent "writer" and wait true.`,
+      `Step 4: reply with the agent's report only.`,
+    ].join(' ')
+    log('scenario steer: running the headless turn …')
+    const output = await runHeadlessTurn(prompt, steeredPath, 420_000)
+
+    const sessions = await loadSessions(RUN_TAG)
+    const parent = sessions.find(s => !s.isChild && s.toolCalls.some(c => c.data?.name === 'Agent'))
+    // The child is identified by the STEER_TAG — the one string that must
+    // reach the child's durable log for the scenario to mean anything. The
+    // spawn task text is NOT reliable for identification: the parent model
+    // sometimes paraphrases the prompt it forwards (seen live: "sleep 25"
+    // rewritten away), which is model behaviour, not a bridge property.
+    const child = sessions.find(s => s.isChild && s.raw.includes(STEER_TAG))
+    const problems = []
+    const steeredLanded = existsSync(steeredPath) && readFileSync(steeredPath, 'utf8').includes(STEER_TAG)
+    if (!steeredLanded) problems.push('steered file missing or wrong — the steer never reached the child model')
+    if (parent === undefined) problems.push('no parent session with an Agent tool/call')
+    if (parent !== undefined) {
+      if (!parent.toolCalls.some(c => c.data?.name === 'steer_subagent')) problems.push('parent never called steer_subagent')
+      if (parent.toolCalls.some(c => c.data?.name === 'bash')) problems.push('parent ran bash itself — the file proves nothing')
+    }
+    if (child === undefined) problems.push('no child session carrying the steer text')
+    if (child !== undefined) {
+      const firstRequest = child.events.findIndex(e => e.type === 'request/header')
+      const steerEvent = child.events.findIndex(e => JSON.stringify(e).includes(STEER_TAG) && e.type !== 'request/header')
+      if (firstRequest !== -1 && steerEvent !== -1 && steerEvent < firstRequest) {
+        problems.push('steer message precedes the first model request — not a mid-run delivery')
+      }
+    }
+    const gatePath = baseEnv.PI2DSH_READINESS_LOG
+    const gateRecords = existsSync(gatePath) ? readFileSync(gatePath, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+    if (!gateRecords.some(entry => entry.stage === 'release')) problems.push('readiness fixture did not observe a child request')
+    scenarios.steer = {
+      gateObserved: gateRecords.some(entry => entry.stage === 'release'),
+      timingGate: 'public tools/pre-execute waits for a real child request/header before allowing steer',
+      status: problems.length === 0 ? 'passed' : 'failed',
+      problems,
+      steeredLanded,
+      alphaAlsoLanded: existsSync(alphaPath),
+      spawnTaskVerbatim: child?.raw.includes('sleep 25') ?? null,
+      parentToolCalls: parent?.toolCalls.map(c => c.data?.name) ?? null,
+      childFile: child?.file ?? null,
+      outputTail: problems.length > 0 ? output.slice(-1200) : undefined,
+    }
+    log(`scenario steer: ${scenarios.steer.status}${problems.length > 0 ? ` — ${problems.join('; ')}` : ''}`)
+    if (process.env.PI2DSH_LIFECYCLE_ONLY === 'steer') {
+      await record(problems.length === 0 ? 'passed' : 'failed')
+      process.exit(problems.length === 0 ? 0 : 1)
+    }
+  }
+
+  // ======================================================================
+  // Scenario 1b — failure-report: the child's closing words reach the
+  // parent. deepseek-harness #4334/#4639 report the native background
+  // notice arriving empty ("Its closing message:" and nothing after);
+  // through pi-subagents the parent's get_subagent_result result block must
+  // carry the reason the child stated. Anti-forgery shape borrowed from
+  // resume's codeword: the reason string lives ONLY in a file the child
+  // reads — the parent's prompt names the path, never the word — so the tag
+  // can arrive in the parent's log through the child's report alone.
+  // ======================================================================
+  if (!modelOnly) {
+    const REASON = `FAILCAUSE_${randomBytes(6).toString('hex').toUpperCase()}`
+    const reasonPath = join(workDir, `reason-${RUN_TAG}.txt`)
+    await writeFile(reasonPath, `${REASON}\n`)
+    const prompt = [
+      `Do these steps in order. You yourself must NEVER call the read or bash tools — only the subagent may;`,
+      `if you call them yourself the task is failed.`,
+      `Step 1: call the Agent tool once: subagent_type general-purpose, name "doomed", run_in_background true,`,
+      `prompt: "Use the read tool to read the file ${reasonPath}. This task cannot be completed and you must abort it.`,
+      `Your final reply must be exactly: TASK FAILED: <the single word you read from that file>. Nothing else."`,
+      `Step 2: call get_subagent_result with agent "doomed" and wait true.`,
+      `Step 3: reply with the agent's report only.`,
+    ].join(' ')
+    log('scenario failure-report: running the headless turn …')
+    const output = await runHeadlessTurn(prompt, undefined, 420_000)
+
+    const sessions = await loadSessions(reasonPath)
+    const parent = sessions.find(s => !s.isChild && s.toolCalls.some(c => c.data?.name === 'Agent'))
+    const child = sessions.find(s => s.isChild && s.raw.includes(REASON))
+    const problems = []
+    if (parent === undefined) problems.push('no parent session with an Agent tool/call')
+    if (child === undefined) problems.push('no child session carrying the reason word')
+    let reportCarried = false
+    if (parent !== undefined) {
+      if (parent.toolCalls.some(c => c.data?.name === 'read')) problems.push('parent read the reason file itself — the report proves nothing')
+      if (parent.toolCalls.some(c => c.data?.name === 'bash')) problems.push('parent ran bash itself')
+      // The claim is about the REPORT CHANNEL: the reason must sit inside a
+      // get_subagent_result tool RESULT block, not merely in parent prose.
+      const reportCallIds = new Set(parent.toolCalls
+        .filter(c => c.data?.name === 'get_subagent_result')
+        .map(c => c.data?.callId))
+      reportCarried = parent.events.some(e => e.type === 'tool/result'
+        && reportCallIds.has(e.data?.message?.toolCallId) && JSON.stringify(e.data.message.content).includes(REASON))
+      if (reportCallIds.size === 0) problems.push('parent never called get_subagent_result')
+      if (!reportCarried) problems.push('the failure reason never appeared inside a get_subagent_result result block')
+    }
+    scenarios.failureReport = {
+      status: problems.length === 0 ? 'passed' : 'failed',
+      problems,
+      reportCarried,
+      childFile: child?.file ?? null,
+      outputTail: problems.length > 0 ? output.slice(-1200) : undefined,
+    }
+    log(`scenario failure-report: ${scenarios.failureReport.status}${problems.length > 0 ? ` — ${problems.join('; ')}` : ''}`)
+  }
+
+  // ======================================================================
+  // Scenario 2 — resume: a resumed child keeps its session and its memory.
+  // Model-compliance failures (the parent grabbing bash/read itself) get ONE
+  // retry — they falsify the evidence, not the feature.
+  // ======================================================================
+  for (let resumeAttempt = 1; !modelOnly && resumeAttempt <= 3; resumeAttempt += 1) {
+    const CODEWORD = `CODEWORD_${randomBytes(6).toString('hex').toUpperCase()}`
+    const secretPath = join(workDir, `secret-${RUN_TAG}-${resumeAttempt}.txt`)
+    const recallPath = join(workDir, `recall-${RUN_TAG}-${resumeAttempt}.txt`)
+    await rm(recallPath, { force: true })
+    await writeFile(secretPath, `${CODEWORD}\n`)
+    // No prompt below contains the codeword — it exists only inside secret.txt.
+    // Upstream note (pi-subagents 0.18.0): resume accepts only the agent ID
+    // (getRecord), while steer/get_result also accept the handle — so the
+    // parent must capture the ID from get_subagent_result before resuming.
+    const prompt = [
+      `Do these steps in order. You yourself must NEVER call the read or bash tools under any circumstances — only the subagent may; if you call them yourself the task is failed. Do not verify any file yourself at any point.`,
+      `Step 1: call the Agent tool: subagent_type general-purpose, name "memory", run_in_background true,`,
+      `prompt: "Use the read tool to read the file ${secretPath} and memorize the codeword written inside.`,
+      `Reply with exactly the single word: memorized. Never write the codeword in any reply."`,
+      `Step 2: call get_subagent_result with agent "memory" and wait true. Note the exact Agent ID from the first`,
+      `line of the result (the string after "Agent: ").`,
+      `Step 3: call the Agent tool again with resume set to that exact Agent ID (NOT the name) and run_in_background false,`,
+      `and the prompt EXACTLY this text, copied verbatim with nothing added: "Without reading any file, run exactly`,
+      `one bash command that writes the codeword you memorized into ${recallPath}. Then reply done."`,
+      `The resume prompt must NOT contain the codeword itself — the agent remembers it.`,
+      `Step 4: reply done.`,
+    ].join(' ')
+    log('scenario resume: running the headless turn …')
+    const output = await runHeadlessTurn(prompt, recallPath, 480_000)
+
+    const problems = []
+    const recalled = existsSync(recallPath) && readFileSync(recallPath, 'utf8').includes(CODEWORD)
+    if (!recalled) problems.push('recall file missing or wrong — the resumed child did not carry its memory')
+    const sessions = await loadSessions(secretPath)
+    const parent = sessions.find(s => !s.isChild)
+    const children = sessions.filter(s => s.isChild)
+    const both = children.filter(s => s.raw.includes('memorized') || s.raw.includes(secretPath))
+    const sameSession = children.find(s => s.raw.includes(secretPath) && s.raw.includes(recallPath))
+    if (sameSession === undefined) {
+      problems.push(`memorize and recall turns are not in one child session (${children.length} child log(s) matched)`)
+    } else {
+      // DSH logs request/header once per turn opening, and a followup that
+      // extends a still-open turn shares it — TURNS are the resume signal.
+      const turns = sameSession.events.filter(e => e.type === 'turn/start').length
+      if (turns < 2) problems.push(`the resumed session shows ${turns} turn(s); resume must open a second one`)
+      const reads = sameSession.toolCalls.filter(c => c.data?.name === 'read' && JSON.stringify(c.data?.arguments ?? '').includes('secret'))
+      if (reads.length !== 1) problems.push(`expected exactly one read of the secret (turn 1); saw ${reads.length}`)
+      // The resumed user prompt must not smuggle the codeword in.
+      const userEvents = sameSession.events.filter(e => JSON.stringify(e).includes(recallPath) && !JSON.stringify(e).includes('tool'))
+      if (userEvents.some(e => JSON.stringify(e).includes(CODEWORD))) {
+        problems.push('the resume prompt itself contained the codeword — memory proves nothing')
+      }
+    }
+    if (parent !== undefined) {
+      if (parent.toolCalls.some(c => c.data?.name === 'bash')) problems.push('parent ran bash itself')
+      if (parent.toolCalls.some(c => c.data?.name === 'read' && JSON.stringify(c.data?.arguments ?? '').includes('secret'))) {
+        problems.push('parent read the secret itself')
+      }
+      if (parent.raw.includes(CODEWORD) && !recalled) problems.push('codeword leaked into the parent log without a recall')
+    }
+    scenarios.resume = {
+      status: problems.length === 0 ? 'passed' : 'failed',
+      problems,
+      attempt: resumeAttempt,
+      recalled,
+      childSessionFile: sameSession?.file ?? null,
+      childTurns: sameSession?.events.filter(e => e.type === 'turn/start').length ?? 0,
+      matchedChildLogs: both.length,
+      outputTail: problems.length > 0 ? output.slice(-1200) : undefined,
+    }
+    log(`scenario resume (attempt ${resumeAttempt}): ${scenarios.resume.status}${problems.length > 0 ? ` — ${problems.join('; ')}` : ''}`)
+    const compliance = problems.every(problem => problem.includes('parent ran bash')
+      || problem.includes('parent read the secret')
+      || problem.includes('resume prompt itself contained the codeword'))
+    if (problems.length === 0 || !compliance) break
+  }
+
+  // ======================================================================
+  // Scenario 4 — resume-archive: a child reopened ACROSS PROCESSES by its
+  // archive identity is the same conversation (pi-subagents' tombstone
+  // resurrect shape: SessionManager.open(file) -> createAgentSession).
+  // ======================================================================
+  if (!modelOnly) {
+    const CODEWORD = `ARCHIVE_${randomBytes(6).toString('hex').toUpperCase()}`
+    const secretPath = join(workDir, `archive-secret-${RUN_TAG}.txt`)
+    const identityPath = join(workDir, `archive-identity-${RUN_TAG}.json`)
+    const recallPath = join(workDir, `archive-recall-${RUN_TAG}.txt`)
+    await rm(identityPath, { force: true })
+    await rm(recallPath, { force: true })
+    await writeFile(secretPath, `${CODEWORD}\n`)
+    const problems = []
+    log('scenario resume-archive: process 1 (spawn + memorize) …')
+    const promptA = [
+      `Call the sub_archive_spawn tool exactly once with arguments {"secret": "${secretPath}", "out": "${identityPath}"}.`,
+      'Do not call any other tool and do not use read or bash yourself. Then reply done.',
+    ].join(' ')
+    const outA = await runHeadlessTurn(promptA, identityPath, 300_000)
+    if (!existsSync(identityPath)) {
+      problems.push('the probe never recorded an archive identity (process 1 failed)')
+      scenarios.resumeArchive = { status: 'failed', problems, outputTail: outA.slice(-1200) }
+    } else {
+      const identity = JSON.parse(readFileSync(identityPath, 'utf8'))
+      if (!existsSync(String(identity.archive))) problems.push('the archive path does not exist on disk')
+      else {
+        // The archive must BE a Pi session file, not a bare inode: its first
+        // line is a genuine Pi header (real Pi's SessionManager.open parses
+        // it). This fails on the pre-Pi-format private shape and on an empty
+        // token file alike.
+        try {
+          const firstLine = JSON.parse(readFileSync(String(identity.archive), 'utf8').split('\n')[0])
+          if (firstLine?.type !== 'session') problems.push(`the archive's first line is not a Pi session header (${JSON.stringify(firstLine?.type)})`)
+        } catch {
+          problems.push('the archive\'s first line is not parseable as a Pi session header')
+        }
+      }
+      log('scenario resume-archive: process 2 (reopen + recall from memory) …')
+      const promptB = [
+        `Call the sub_archive_resume tool exactly once with arguments {"identity": "${identityPath}", "recall": "${recallPath}"}.`,
+        'Do not call any other tool and do not use read or bash yourself. Then reply done.',
+      ].join(' ')
+      const outB = await runHeadlessTurn(promptB, recallPath, 300_000)
+      const recalled = existsSync(recallPath) && readFileSync(recallPath, 'utf8').includes(CODEWORD)
+      if (!recalled) problems.push('the reopened child did not recall the codeword — the reopen is not the same conversation')
+      const sessions = await loadSessions(secretPath)
+      const children = sessions.filter(s => s.isChild)
+      const same = children.find(s => s.raw.includes(recallPath))
+      if (same === undefined) {
+        problems.push(`memorize and recall are not in one child session (${children.length} child log(s) matched)`)
+      } else {
+        const turns = same.events.filter(e => e.type === 'turn/start').length
+        if (turns < 2) problems.push(`the reopened session shows ${turns} turn(s); the recall must be a new turn in the SAME log`)
+        const descriptors = same.events.filter(e => e.type === 'subagent/descriptor').length
+        if (descriptors !== 1) problems.push(`expected exactly one subagent/descriptor, saw ${descriptors} (a reopen must not duplicate identity)`)
+        const reads = same.toolCalls.filter(c => c.data?.name === 'read' && JSON.stringify(c.data?.arguments ?? '').includes('archive-secret'))
+        if (reads.length !== 1) problems.push(`expected exactly one read of the secret (process 1); saw ${reads.length}`)
+        if (String(identity.sessionId ?? '').length > 0 && !same.file.includes(String(identity.sessionId))) {
+          problems.push('the recall landed in a different session than the recorded identity')
+        }
+      }
+      scenarios.resumeArchive = {
+        status: problems.length === 0 ? 'passed' : 'failed',
+        problems,
+        recalled,
+        archive: identity.archive ?? null,
+        childSessionFile: same?.file ?? null,
+        childTurns: same?.events.filter(e => e.type === 'turn/start').length ?? 0,
+        outputTail: problems.length > 0 ? outB.slice(-1200) : undefined,
+      }
+    }
+    log(`scenario resume-archive: ${scenarios.resumeArchive.status}${problems.length > 0 ? ` — ${problems.join('; ')}` : ''}`)
+  }
+
+  // ======================================================================
+  // Scenario 3 — stop: interrupting the parent stops the running child.
+  // ======================================================================
+  if (modelOnly || process.env.PI2DSH_SKIP_TUI !== undefined) {
+    scenarios.stop = { status: 'skipped', reason: modelOnly ? 'not selected (model-follow only)' : 'PI2DSH_SKIP_TUI set' }
+  } else {
+    const STOP_TAG = `SHOULD_NOT_EXIST_${RUN_TAG}`
+    const cPath = join(workDir, `stopped-agent-output-${RUN_TAG}.txt`)
+    await rm(cPath, { force: true })
+    const TMUX_SESSION = `pi2dsh-subagents-lifecycle-${RUN_TAG}`
+    const tuiVersion = JSON.parse(await readFile(
+      join(home, 'profiles', 'tui', 'node_modules', '@deepseek-harness-tui', 'dsh-tui', 'package.json'), 'utf8')).version
+    await execFile('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {})
+    const launcher = join(root, 'launch-tui.sh')
+    await writeFile(launcher, `#!/bin/sh\nexec "${dshBin}" --profile tui\n`)
+    await chmod(launcher, 0o755)
+    log(`scenario stop: booting the stock TUI ${tuiVersion} in tmux …`)
+    await execFile('tmux', ['new-session', '-d', '-s', TMUX_SESSION, '-x', '180', '-y', '50', '-c', workDir,
+      'env', `DSH_HOME=${home}`, `DEEPSEEK_API_KEY=${apiKey}`, 'NO_COLOR=1', launcher,
+    ], { timeout: 30_000 })
+    const capture = async () => {
+      const { stdout } = await execFile('tmux', ['capture-pane', '-p', '-t', TMUX_SESSION, '-S', '-200'], { timeout: 15_000 })
+      return stdout
+    }
+    const problems = []
+    let interruptedAt = 0
+    try {
+      const composerDeadline = Date.now() + 120_000
+      for (;;) {
+        const screen = await capture()
+        if (/Esc skip the guide/iu.test(screen)) {
+          await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Escape'])
+          await delay(500)
+          continue
+        }
+        if (/Say something, or type \/ for commands/u.test(screen) || (/⌸ ❯/u.test(screen) && /Context loaded/u.test(screen))) {
+          await delay(1000)
+          if (/Esc skip the guide/iu.test(await capture())) {
+            await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Escape'])
+            continue
+          }
+          break
+        }
+        if (Date.now() > composerDeadline) throw new Error('TUI composer never appeared')
+        await delay(1500)
+      }
+      const message = [
+        `Call the Agent tool exactly once: subagent_type general-purpose, name "sleeper", run_in_background false,`,
+        // A backgrounded sleep returns immediately and lets the model write
+        // the file before any abort can land (seen live) — the FOREGROUND
+        // blocking run is the scenario's whole point, so forbid backgrounding.
+        `prompt: "Run the bash command \`sleep 90\` in the FOREGROUND and wait for it to finish — do not set run_in_background,`,
+        `do not append &. When it finishes, write the file ${cPath} containing ${STOP_TAG}`,
+        `using bash, then reply done." Do not run bash yourself.`,
+      ].join(' ')
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', message])
+      await delay(500)
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter'])
+      // Wait until the child's sleep is really running (its durable log shows
+      // the bash call), then interrupt the parent turn with Esc.
+      const runningDeadline = Date.now() + 240_000
+      let childRunning = false
+      for (;;) {
+        const sessions = await loadSessions(STOP_TAG)
+        const child = sessions.find(s => s.isChild && s.toolCalls.some(c => c.data?.name === 'bash'))
+        if (child !== undefined) { childRunning = true; break }
+        if (Date.now() > runningDeadline) break
+        await delay(2000)
+      }
+      if (!childRunning) {
+        problems.push('the child never started its sleep — nothing to stop')
+      } else {
+        // Esc is delivered by tmux, and the TUI can eat one keypress (an
+        // autocomplete or overlay steals focus). The DURABLE parent log is
+        // the authority on whether the interrupt took: retry Esc until the
+        // parent's turn really ends with an aborted/user reason.
+        const parentAborted = async () => {
+          const sessions = await loadSessions(STOP_TAG)
+          const parent = sessions.find(s => !s.isChild)
+          return parent?.events.some(e =>
+            e.type === 'turn/end' && JSON.stringify(e.data?.reason ?? {}).includes('aborted')) === true
+        }
+        for (let attempt = 0; attempt < 8 && interruptedAt === 0; attempt += 1) {
+          await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Escape'])
+          await delay(3000)
+          if (await parentAborted()) interruptedAt = Date.now()
+        }
+        if (interruptedAt === 0) {
+          problems.push('the parent turn never recorded an aborted turn/end — the interrupt did not reach the TUI (harness)')
+        } else {
+          log('scenario stop: parent turn durably aborted — waiting out the sleep window …')
+          // The sleep would finish ~90s after it started. Wait until well
+          // past that from the moment of interruption, then check the file.
+          await delay(130_000)
+          if (existsSync(cPath)) {
+            problems.push('the stopped child still wrote its output file — the stop did not take')
+          }
+          // Durable record of how the child's turn ended (aborted = stopped).
+          const sessions = await loadSessions(STOP_TAG)
+          const child = sessions.find(s => s.isChild)
+          scenarios.stopChildTurnEnds = child?.events
+            .filter(e => e.type === 'turn/end')
+            .map(e => JSON.stringify(e.data?.reason ?? {})) ?? []
+        }
+        // The bridge warns loud (console + logger) when Agent.cancel is
+        // missing or fails; the pane is where that console line surfaces.
+        scenarios.stopPaneTail = (await capture().catch(() => '')).slice(-2000)
+        // Secondary (non-gating) evidence: what the package's manager shows.
+        await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', '/pi-agents']).catch(() => {})
+        await delay(500)
+        await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter']).catch(() => {})
+        await delay(4000)
+        scenarios.stopManagerScreen = (await capture().catch(() => '')).slice(-1500)
+      }
+    } finally {
+      await execFile('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {})
+    }
+    scenarios.stop = {
+      status: problems.length === 0 ? 'passed' : 'failed',
+      problems,
+      tuiVersion,
+      interrupted: interruptedAt > 0,
+      outputFileAbsentAfterWindow: !existsSync(cPath),
+    }
+    log(`scenario stop: ${scenarios.stop.status}${problems.length > 0 ? ` — ${problems.join('; ')}` : ''}`)
+  }
+
+  // ======================================================================
+  // Scenario 5 — model-follow: a child spawned AFTER a real /model switch in
+  // the TUI runs on the switched route, not the creation-time default.
+  // The stale-inheritance shape DSH's own subagent line reports (#455/#2006):
+  // the parent's AgentOptions snapshot never learns of a UI switch — the
+  // bridge must read the caller's live route off the durable request/header.
+  // ======================================================================
+  if (process.env.PI2DSH_SKIP_TUI !== undefined) {
+    scenarios.modelFollow = { status: 'skipped', reason: 'PI2DSH_SKIP_TUI set' }
+    scenarios.explicitModelThinking = { status: 'skipped', reason: 'PI2DSH_SKIP_TUI set' }
+  } else {
+    const FOLLOW_TAG = `FOLLOW_${RUN_TAG}`
+    const followMarker = join(workDir, `model-follow-${RUN_TAG}.txt`)
+    await rm(followMarker, { force: true })
+    const TMUX_SESSION = `pi2dsh-subagents-modelfollow-${RUN_TAG}`
+    await execFile('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {})
+    const launcher = join(root, 'launch-tui-follow.sh')
+    await writeFile(launcher, `#!/bin/sh\nexec "${dshBin}" --profile tui\n`)
+    await chmod(launcher, 0o755)
+    log('scenario model-follow: booting the stock TUI …')
+    await execFile('tmux', ['new-session', '-d', '-s', TMUX_SESSION, '-x', '180', '-y', '50', '-c', workDir,
+      'env', `DSH_HOME=${home}`, `DEEPSEEK_API_KEY=${apiKey}`, 'NO_COLOR=1', launcher,
+    ], { timeout: 30_000 })
+    const capture = async () => {
+      const { stdout } = await execFile('tmux', ['capture-pane', '-p', '-t', TMUX_SESSION, '-S', '-200'], { timeout: 15_000 })
+      return stdout
+    }
+    const problems = []
+    try {
+      const composerDeadline = Date.now() + 120_000
+      for (;;) {
+        const screen = await capture()
+        if (/Esc skip the guide/iu.test(screen)) {
+          await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Escape'])
+          await delay(500)
+          continue
+        }
+        if (/Say something, or type \/ for commands/u.test(screen) || (/⌸ ❯/u.test(screen) && /Context loaded/u.test(screen))) {
+          await delay(1000)
+          if (/Esc skip the guide/iu.test(await capture())) {
+            await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Escape'])
+            continue
+          }
+          break
+        }
+        if (Date.now() > composerDeadline) throw new Error('TUI composer never appeared')
+        await delay(1500)
+      }
+      // Pin the STARTING route deterministically: the default model selection
+      // is DSH_HOME-level persistent, so a reused home may remember work-gw
+      // from an earlier run — force the official route first, then the later
+      // switch is observable as a CHANGE.
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', '/model deepseek-official/deepseek-flash'])
+      await delay(800)
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter'])
+      await delay(2500)
+      // The home composer transitions to the chat after /model. Startup may
+      // take longer than a fixed sleep; do not type the warmup into that gap.
+      // On the home slash menu, the first Enter accepts the completion.
+      if (/⌘ \/model/u.test(await capture())) {
+        await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter'])
+      }
+      const chatDeadline = Date.now() + 120_000
+      // Current dsh-TUI keeps /model on the home composer until a real
+      // message is sent. Both visible composers can accept the warmup;
+      // the durable route assertions below still prove which model ran.
+      while (!/⌸ ❯|Say something, or type \/ for commands/u.test(await capture())) {
+        if (Date.now() > chatDeadline) throw new Error('chat composer did not become ready after /model')
+        await delay(1000)
+      }
+      // Turn 1 on the DEFAULT route: pins the parent's creation-time snapshot
+      // in the durable log, so the later switch is observable as a CHANGE.
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', `Reply with exactly: warmup-${FOLLOW_TAG}`])
+      await delay(500)
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter'])
+      // Several sessions in a shared home can carry the tag (a resumed
+      // recent session, another scenario's TUI): the parent is identified by
+      // content unique to its phase — the warmup text before the spawn, the
+      // marker path (only the spawn prompt carries it) afterwards.
+      const parentSession = async marker => {
+        const sessions = await loadSessions(marker)
+        return sessions.find(s => !s.isChild)
+      }
+      const configsOf = subject => (subject?.events ?? [])
+        .filter(e => e.type === 'request/header')
+        .map(e => {
+          const data = e.data ?? {}
+          const header = data.header ?? {}
+          for (const shape of [data.config, header.config, header, data]) {
+            if (typeof shape?.model === 'string') return { ...shape }
+          }
+          return {}
+        })
+      const routesOf = subject => configsOf(subject)
+        .map(config => ({ provider: config.provider, model: config.model }))
+      const warmupDeadline = Date.now() + 180_000
+      for (;;) {
+        const parent = await parentSession(`warmup-${FOLLOW_TAG}`)
+        if (parent !== undefined && routesOf(parent).length > 0
+          && parent.events.some(e => e.type === 'turn/end')) break
+        if (Date.now() > warmupDeadline) throw new Error('the warmup turn never completed')
+        await delay(2000)
+      }
+      const before = routesOf(await parentSession(`warmup-${FOLLOW_TAG}`))
+      const defaultProvider = String(before[0]?.provider ?? '')
+      if (defaultProvider === 'work-gw') problems.push('the warmup turn already ran on work-gw — nothing to switch from')
+
+      // The real /model switch, parameterized: the picker's Enter confirms
+      // whatever is highlighted (the CURRENT model), so driving the menu from
+      // tmux re-selects the old route — the argument form switches exactly.
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', '/model work-gw/deepseek-flash'])
+      await delay(800)
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter'])
+      await delay(2500)
+      scenarios.modelFollowPickerScreen = (await capture().catch(() => '')).slice(-800)
+
+      // Turn 2: spawn a child. Its own durable request/header is the verdict.
+      const spawnMessage = [
+        `Call the Agent tool exactly once: subagent_type general-purpose, name "follower", run_in_background false,`,
+        `prompt: "Run one bash command that writes the single word DONE_${FOLLOW_TAG} into ${followMarker}, then reply done."`,
+        `Do not run bash yourself. Then reply done.`,
+      ].join(' ')
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', spawnMessage])
+      await delay(500)
+      await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter'])
+      const spawnDeadline = Date.now() + 300_000
+      while (!existsSync(followMarker) && Date.now() < spawnDeadline) await delay(2000)
+      if (!existsSync(followMarker)) problems.push('the child never wrote its marker — the delegation turn did not finish')
+      await delay(8000)
+
+      const parent = await parentSession(followMarker)
+      const parentRoutes = routesOf(parent)
+      const last = parentRoutes.at(-1) ?? {}
+      if (String(last.provider ?? '') !== 'work-gw') {
+        problems.push(`the parent's last request did not run on work-gw (${JSON.stringify(parentRoutes)}) — the /model switch did not take (harness)`)
+      }
+      const children = (await loadSessions(FOLLOW_TAG)).filter(s => s.isChild)
+      const child = children.find(s => s.raw.includes(followMarker))
+      if (child === undefined) {
+        problems.push('no child session carrying the delegation task')
+      } else {
+        const childRoutes = routesOf(child)
+        if (!childRoutes.some(route => String(route.provider ?? '') === 'work-gw')) {
+          problems.push(`the child ran on ${JSON.stringify(childRoutes)} instead of work-gw — it inherited the stale creation-time route`)
+        }
+      }
+      scenarios.modelFollow = {
+        status: problems.length === 0 ? 'passed' : 'failed',
+        problems,
+        defaultProvider,
+        parentRoutes,
+        childRoutes: child === undefined ? null : routesOf(child),
+        markerLanded: existsSync(followMarker),
+      }
+
+      // Scenario 6 — explicit-model-thinking. Keep this SAME parent on
+      // work-gw, but explicitly pin one child to the official route and max
+      // effort. If either Pi option is dropped, the child's durable header
+      // exposes it; if the request never really runs, the marker stays absent.
+      const explicitProblems = []
+      const EXPLICIT_TAG = `EXPLICIT_${RUN_TAG}`
+      const explicitMarker = join(workDir, `explicit-model-thinking-${RUN_TAG}.txt`)
+      await rm(explicitMarker, { force: true })
+      try {
+        const explicitMessage = [
+          `Call the Agent tool exactly once with description "explicit route and effort probe",`,
+          `subagent_type general-purpose, name "explicit-probe", model "deepseek-official/deepseek-flash",`,
+          `thinking "max", run_in_background false, and prompt: "Run one bash command that writes the single word`,
+          `${EXPLICIT_TAG} into ${explicitMarker}, then reply done."`,
+          `Do not run bash yourself. Then reply done.`,
+        ].join(' ')
+        await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, '-l', explicitMessage])
+        await delay(500)
+        await execFile('tmux', ['send-keys', '-t', TMUX_SESSION, 'Enter'])
+        const explicitDeadline = Date.now() + 300_000
+        while (!existsSync(explicitMarker) && Date.now() < explicitDeadline) await delay(2000)
+        if (!existsSync(explicitMarker)) {
+          explicitProblems.push('the explicitly routed child never wrote its marker — no successful real child turn')
+        }
+        await delay(8000)
+
+        const explicitParent = await parentSession(explicitMarker)
+        const explicitParentConfigs = configsOf(explicitParent)
+        const parentLast = explicitParentConfigs.at(-1) ?? {}
+        if (String(parentLast.provider ?? '') !== 'work-gw') {
+          explicitProblems.push(`the parent left work-gw (${JSON.stringify(explicitParentConfigs)}) — explicit child routing is not isolated evidence`)
+        }
+        const agentCall = explicitParent?.toolCalls.find(call =>
+          call.data?.name === 'Agent' && JSON.stringify(call.data?.arguments ?? {}).includes(explicitMarker))
+        const rawAgentArgs = agentCall?.data?.arguments
+        let agentArgs = {}
+        if (typeof rawAgentArgs === 'object' && rawAgentArgs !== null) {
+          agentArgs = rawAgentArgs
+        } else if (typeof rawAgentArgs === 'string') {
+          try {
+            agentArgs = JSON.parse(rawAgentArgs)
+          } catch {
+            explicitProblems.push(`the Agent tool arguments are not valid JSON (${rawAgentArgs})`)
+          }
+        }
+        if (String(agentArgs.model ?? '') !== 'deepseek-official/deepseek-flash') {
+          explicitProblems.push(`the parent did not explicitly pass the requested child model (${JSON.stringify(agentArgs)})`)
+        }
+        if (String(agentArgs.thinking ?? '') !== 'max') {
+          explicitProblems.push(`the parent did not explicitly pass thinking=max (${JSON.stringify(agentArgs)})`)
+        }
+        if (explicitParent?.toolCalls.some(call => call.data?.name === 'bash')) {
+          explicitProblems.push('the parent ran bash itself — the marker proves nothing about the child')
+        }
+
+        const explicitChildren = (await loadSessions(EXPLICIT_TAG)).filter(session => session.isChild)
+        const explicitChild = explicitChildren.find(session => session.raw.includes(explicitMarker))
+        const childConfigs = explicitChild === undefined ? [] : configsOf(explicitChild)
+        const childFirst = childConfigs[0] ?? {}
+        if (String(childFirst.provider ?? '') !== 'deepseek-official'
+          || String(childFirst.model ?? '') !== 'deepseek-flash') {
+          explicitProblems.push(`the child did not use the explicit route (${JSON.stringify(childConfigs)})`)
+        }
+        if (String(childFirst.reasoningEffort ?? '') !== 'max') {
+          explicitProblems.push(`the child request did not carry reasoningEffort=max (${JSON.stringify(childConfigs)})`)
+        }
+        if (explicitChild !== undefined && !explicitChild.toolCalls.some(call => call.data?.name === 'bash')) {
+          explicitProblems.push('the explicit child made no real bash tool call')
+        }
+        scenarios.explicitModelThinking = {
+          status: explicitProblems.length === 0 ? 'passed' : 'failed',
+          problems: explicitProblems,
+          parentConfigs: explicitParentConfigs,
+          agentArguments: agentArgs,
+          childConfigs,
+          childToolCalls: explicitChild?.toolCalls.map(call => call.data?.name) ?? null,
+          markerLanded: existsSync(explicitMarker),
+        }
+      } catch (error) {
+        scenarios.explicitModelThinking = {
+          status: 'failed',
+          problems: [...explicitProblems, String((error && error.message) || error)],
+        }
+      }
+    } catch (error) {
+      await writeFile(join(root, 'model-follow-failure-screen.txt'), await capture().catch(() => 'TUI exited'))
+      scenarios.modelFollow = { status: 'failed', problems: [...problems, String((error && error.message) || error)] }
+      scenarios.explicitModelThinking ??= { status: 'failed', problems: ['model-follow setup failed before the explicit child scenario'] }
+    } finally {
+      await execFile('tmux', ['kill-session', '-t', TMUX_SESSION]).catch(() => {})
+    }
+    log(`scenario model-follow: ${scenarios.modelFollow.status}${(scenarios.modelFollow.problems ?? []).length > 0 ? ` — ${scenarios.modelFollow.problems.join('; ')}` : ''}`)
+    log(`scenario explicit-model-thinking: ${scenarios.explicitModelThinking.status}${(scenarios.explicitModelThinking.problems ?? []).length > 0 ? ` — ${scenarios.explicitModelThinking.problems.join('; ')}` : ''}`)
+  }
+
+  // ======================================================================
+  // Scenario 7 — child-extensions: a pi-subagents child is served the
+  // installed Pi packages exactly as real Pi loads them (default extensions
+  // on), and the creator's own narrowing (`extensions: false` in the agent
+  // type's frontmatter — pi-subagents' native config format) really empties
+  // the set. Falsifiable both ways: the positive child's durable log must
+  // carry a non-error probe_touch tool/result (a tool the FIXTURE package
+  // registers — a model cannot call a tool absent from its registry), and
+  // the negative child, restricted to `tools: read` with extensions off,
+  // must show no probe_touch call and produce no file.
+  // ======================================================================
+  if (!modelOnly) {
+    const EXT_TAG = `EXT_${RUN_TAG}`
+    const touchedPath = join(workDir, `ext-touched-${RUN_TAG}.txt`)
+    const deniedPath = join(workDir, `ext-denied-${RUN_TAG}.txt`)
+    await rm(touchedPath, { force: true })
+    await rm(deniedPath, { force: true })
+    const agentsDir = join(workDir, '.pi', 'agents')
+    await mkdir(agentsDir, { recursive: true })
+    await writeFile(join(agentsDir, 'no-ext.md'), [
+      '---',
+      'name: no-ext',
+      'description: extension-free read-only probe agent',
+      'tools: read',
+      'extensions: false',
+      '---',
+      'You are a minimal agent. Follow the instructions exactly.',
+      '',
+    ].join('\n'))
+
+    log('scenario child-extensions: positive (default extensions reach the child) …')
+    const promptOn = [
+      'Do these steps in order and do not call probe_touch or bash yourself — only the subagent may.',
+      'Step 1: call the Agent tool once: subagent_type general-purpose, name "toucher", run_in_background false,',
+      `prompt: "Call the probe_touch tool exactly once with arguments {\\"out\\": \\"${touchedPath}\\", \\"text\\": \\"${EXT_TAG}\\"}. Then reply done.".`,
+      'Step 2: reply with the agent\'s report only.',
+    ].join(' ')
+    const outputOn = await runHeadlessTurn(promptOn, touchedPath, 420_000)
+
+    log('scenario child-extensions: negative (extensions: false narrows to nothing) …')
+    const promptOff = [
+      'Do these steps in order and do not call probe_touch or bash yourself — only the subagent may.',
+      'Step 1: call the Agent tool once: subagent_type no-ext, name "denied", run_in_background false,',
+      `prompt: "Call the probe_touch tool exactly once with arguments {\\"out\\": \\"${deniedPath}\\", \\"text\\": \\"${EXT_TAG}\\"}. If the tool does not exist, reply exactly: no such tool.".`,
+      'Step 2: reply with the agent\'s report only.',
+    ].join(' ')
+    const outputOff = await runHeadlessTurn(promptOff, undefined, 300_000)
+
+    const problems = []
+    const sessions = await loadSessions(RUN_TAG)
+    const touchChild = sessions.find(s => s.isChild && s.raw.includes(touchedPath))
+    const deniedChild = sessions.find(s => s.isChild && s.raw.includes(deniedPath))
+    const touched = existsSync(touchedPath) && readFileSync(touchedPath, 'utf8').includes(EXT_TAG)
+    if (!touched) problems.push('the probe_touch effect file is missing or wrong — the extension tool never worked in the child')
+    if (touchChild === undefined) problems.push('no child session carrying the positive probe task')
+    if (touchChild !== undefined) {
+      const call = touchChild.toolCalls.some(c => c.data?.name === 'probe_touch')
+      if (!call) problems.push('the positive child\'s durable log has no probe_touch tool/call — the file proves nothing')
+      const failedResult = touchChild.events.some(e => e.type === 'tool/result'
+        && JSON.stringify(e).includes('probe_touch') && JSON.stringify(e).includes('"isError":true'))
+      if (failedResult) problems.push('probe_touch errored in the positive child')
+    }
+    if (deniedChild === undefined) problems.push('no child session carrying the negative probe task')
+    if (deniedChild !== undefined && deniedChild.toolCalls.some(c => c.data?.name === 'probe_touch')) {
+      problems.push('the extensions:false child could still call probe_touch — the creator\'s narrowing did not reach the bridge')
+    }
+    if (existsSync(deniedPath)) problems.push('the denied child produced the effect file — narrowing failed')
+    scenarios.childExtensions = {
+      status: problems.length === 0 ? 'passed' : 'failed',
+      problems,
+      touched,
+      positiveChild: touchChild?.file ?? null,
+      negativeChild: deniedChild?.file ?? null,
+      outputTail: problems.length > 0 ? `${outputOn.slice(-800)}\n---\n${outputOff.slice(-800)}` : undefined,
+    }
+    log(`scenario child-extensions: ${scenarios.childExtensions.status}${problems.length > 0 ? ` — ${problems.join('; ')}` : ''}`)
+  }
+
+  const failed = Object.values(scenarios).filter(s => s?.status === 'failed').length
+  scenarios.stack = { cliVersion, engineVersion, scratch: root }
+  await record(failed === 0 ? 'passed' : 'failed')
+  log(`${failed === 0 ? 'PASSED' : `FAILED (${failed} scenario(s))`} — evidence in ${outPath}`)
+  process.exit(failed === 0 ? 0 : 1)
+} catch (error) {
+  scenarios.harness = { status: 'failed', error: String((error && error.message) || error) }
+  await record('failed')
+  log(`FAILED: ${String((error && error.message) || error)}`)
+  process.exit(1)
+}

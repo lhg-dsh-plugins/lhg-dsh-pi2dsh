@@ -1,0 +1,194 @@
+{
+  "name": "pi2dsh",
+  "version": "0.27.1",
+  "description": "Bridge the Pi and DeepSeek Harness ecosystems: a general Pi Host ABI that runs unmodified Pi extensions as native DSH plugins, with compatibility inspection and Pi-to-DSH MCP config translation.",
+  "type": "module",
+  "bin": {
+    "pi2dsh": "./dist/cli.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "default": "./dist/index.mjs"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.mts",
+      "default": "./dist/runtime.mjs"
+    },
+    "./compat/pi-coding-agent": {
+      "types": "./dist/compat/pi-coding-agent.d.mts",
+      "default": "./dist/compat/pi-coding-agent.mjs"
+    },
+    "./compat/pi-tui": {
+      "types": "./dist/compat/pi-tui.d.mts",
+      "default": "./dist/compat/pi-tui.mjs"
+    },
+    "./compat/pi-ai": {
+      "types": "./dist/compat/pi-ai.d.mts",
+      "default": "./dist/compat/pi-ai.mjs"
+    },
+    "./credentials-oauth": {
+      "types": "./dist/credentials-oauth.d.mts",
+      "default": "./dist/credentials-oauth.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "audit:community": "pnpm build && node scripts/audit-community.mjs",
+    "build": "tsdown",
+    "check": "tsc --noEmit",
+    "check:host": "node scripts/check-host-dependencies.mjs",
+    "check:docs": "pnpm build && node scripts/generate-capability-docs.mjs --check",
+    "check:pack": "pnpm build && publint && node scripts/check-pack.mjs",
+    "docs:capabilities": "node scripts/generate-capability-docs.mjs",
+    "prepare": "tsdown",
+    "test": "pnpm build && vitest run",
+    "test:community": "pnpm build && node scripts/verify-community.mjs --generate community/runtime-results.json",
+    "test:codex-image": "pnpm build && node scripts/verify-codex-image-gen-e2e.mjs",
+    "test:coverage": "pnpm build && vitest run --coverage",
+    "test:dsh": "pnpm build && vitest run tests/dsh-runtime.spec.ts",
+    "test:examples": "pnpm build && node scripts/verify-examples-e2e.mjs",
+    "test:live": "pnpm build && node scripts/verify-live-deepseek.mjs community/live-deepseek-results.json",
+    "test:pi-tui": "pnpm build && node scripts/verify-pi-tui-ecosystem-e2e.mjs",
+    "test:seams": "pnpm build && node scripts/verify-step-seams-e2e.mjs",
+    "verify": "pnpm check:host && pnpm check && pnpm test:coverage && pnpm check:docs && pnpm check:pack",
+    "verify:release": "pnpm verify && PI2DSH_ENGINE_SPEC=pi2dsh@$(node -p \"require('./package.json').version\") node scripts/verify-examples-e2e.mjs && node scripts/verify-step-seams-e2e.mjs && PI2DSH_ENGINE_SPEC=pi2dsh@$(node -p \"require('./package.json').version\") node scripts/verify-pi-tui-ecosystem-e2e.mjs",
+    "test:pi-code": "pnpm build && node scripts/verify-pi-code-headless-e2e.mjs && node scripts/verify-pi-code-web-e2e.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "pi-package",
+    "migration",
+    "compatibility"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lhg-dsh-plugins/lhg-dsh-pi2dsh"
+  },
+  "homepage": "https://github.com/weijiafu14/pi2dsh#readme",
+  "bugs": {
+    "url": "https://github.com/weijiafu14/pi2dsh/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "dependencies": {
+    "cross-spawn": "^7.0.6",
+    "diff": "^9.0.0",
+    "get-east-asian-width": "1.6.0",
+    "ignore": "7.0.5",
+    "jiti": "^2.7.0",
+    "marked": "^16.4.2",
+    "pacote": "^21.0.0",
+    "proper-lockfile": "4.1.2",
+    "tinyglobby": "^0.2.15",
+    "typebox": "^1.0.4",
+    "yaml": "^2.8.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-agent-instructions": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-commands": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-user-questions": "0.2.1-rc.2",
+    "@xmoon76/dsh-pi-tui": "^0.5.1",
+    "typescript": "^5",
+    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-commands": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent-instructions": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-attachment": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-credentials": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-skill-filesystem": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subprocess": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-questions": {
+      "optional": true
+    },
+    "@xmoon76/dsh-pi-tui": {
+      "optional": true
+    },
+    "typescript": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subprocess-local": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-attachment-local": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-authorization": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-commands": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-credentials": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-credentials-local": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-agent-instructions": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm-pi-ai": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-scope": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-settings": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-skill": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-timeout": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-user-questions": "0.2.1-rc.2",
+    "@earendil-works/pi-ai": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@types/node": "^24.10.0",
+    "@types/pacote": "^11.1.8",
+    "@types/proper-lockfile": "^4.1.4",
+    "@vitest/coverage-v8": "^4.1.10",
+    "publint": "^0.3.23",
+    "tsdown": "^0.22.14",
+    "undici": "^8.10.0",
+    "vitest": "^4.1.10",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-persistence": "0.2.1-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "name": "dsh-work-x",
+  "version": "0.6.0",
+  "description": "Capability suite for DeepSeek Harness: Pi MCP manager, subagents, side conversations, memory, background tasks and credential-dependent image generation.",
+  "license": "MIT",
+  "author": "pi2dsh contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/weijiafu14/pi2dsh.git",
+    "directory": "dsh-x"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "mcp",
+    "subagents",
+    "pi2dsh"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json",
+    "./client": "./client.js"
+  },
+  "files": [
+    "README.md",
+    "client.js",
+    "cordis.patch.yml",
+    "index.mjs"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "pi2dsh": {
+    "suite": [
+      "pi-mcp-adapter",
+      "@tintinweb/pi-subagents",
+      "pi-btw",
+      "@crazygit/pi-codex-image-gen",
+      "pi-hermes-memory",
+      "pi-background-tasks"
+    ]
+  },
+  "dependencies": {
+    "@crazygit/pi-codex-image-gen": "0.2.2",
+    "@tintinweb/pi-subagents": "0.20.0",
+    "pi-background-tasks": "2.4.2",
+    "pi-btw": "0.4.1",
+    "pi-hermes-memory": "0.9.7",
+    "pi-mcp-adapter": "2.27.0",
+    "pi2dsh": "^0.27.0"
+  },
+  "scripts": {
+    "prepack": "node -e \"require('fs').accessSync('client.js')\" || (echo 'dsh-x/client.js missing \u2014 run pnpm build at the repo root first' && exit 1)"
+  }
+}

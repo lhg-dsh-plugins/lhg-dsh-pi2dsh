@@ -1,0 +1,113 @@
+// Prove examples/presentation-surfaces on the WEB surface, with a REAL plugin.
+//
+//   node docs/posting-kit/capture-surfaces.mjs <out-dir> [--url http://127.0.0.1:5189]
+//
+// The plugin is pi-powerline-footer, unmodified from npm. It draws a terminal
+// status line — model, thinking level, project, context usage — through Pi's
+// setWidget, and this asserts that line reaches DSH's own widget dock.
+//
+// It deliberately does NOT use a package we wrote. A demo package drives the
+// surfaces we thought to drive, in the shapes we thought to use; this one emits
+// raw ANSI colour, which is how the seats were found rendering escape codes as
+// visible text. The example's plugin list is measured the same way — see
+// community/surface-usage.json.
+import { openApp } from './web-drive.mjs'
+
+// The plugin's own vocabulary. None of these strings exist anywhere else in the
+// app, so the dock holding them means the Pi package drew there.
+const OWN_MARKS = [/think:/u, /\d+(?:\.\d+)?[KM]?\s*\(\d/u]
+const ESC = ''
+
+const { page, browser, shot, send, UI } = await openApp()
+
+try {
+await page.getByRole('button', { name: UI.newSession }).first().click({ timeout: 60_000 })
+
+// A real message FIRST, so the conversation is actually on screen before the
+// command runs. On the 0.1.2 line a slash command submitted from the New
+// Session draft executes in a fresh session while the page STAYS on the
+// draft — the session doesn't open, doesn't stage, and doesn't even list in
+// the sidebar (reproduced live 2026-08-31; upstream candidate). Floating
+// surfaces rightly follow the on-stage conversation, so the capture must be
+// in one. The rc lines open the conversation either way; this path is
+// identical for both.
+await send('Say OK and nothing else.')
+
+async function togglePowerline() {
+
+  // `/powerline` shares its prefix with `/powerline-perf`, so Send stays disabled
+  // until one is PICKED from the suggestion popover — the documented gesture, and
+  // the reason a straight type-and-click hangs here.
+  const composer = page.getByRole('textbox').last()
+  await composer.click()
+  await composer.pressSequentially('/powerline', { delay: 25 })
+  // The package's commands register when the fresh session's Agent mounts its
+  // Pi runtime — an eventual palette, a beat behind session creation. Wait for
+  // the suggestion to actually list the command before picking it; typing
+  // blind races the mount and silently loses the command. Still falsifiable:
+  // if the command never registers, this times out and fails.
+  const suggestionDeadline = Date.now() + 60_000
+  for (;;) {
+    const listed = await page.evaluate(() => /powerline status/u.test(document.body.innerText))
+    if (listed) break
+    if (Date.now() > suggestionDeadline) throw new Error('capture: /powerline never appeared in the command suggestions')
+    await page.waitForTimeout(500)
+    // Re-arm the popover: retype the line so a popup that raced the palette
+    // refresh reopens against the current registry.
+    await composer.fill('')
+    await composer.pressSequentially('/powerline', { delay: 25 })
+  }
+  await page.waitForTimeout(300)
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(800)
+  const sendButton = page.getByRole('button', { name: UI.send })
+  if (await sendButton.isEnabled().catch(() => false)) await sendButton.click({ timeout: 30_000 })
+  else await page.keyboard.press('Enter')
+}
+
+// Widgets float in the overlay stack (pill for a status line, card for
+// content) — the in-column dock strip is gone. Read every widget presence.
+const widgets = page.locator('[data-pi2dsh="widget"]')
+async function waitForPowerline(visible) {
+  const deadline = Date.now() + 90_000
+  for (;;) {
+    const count = await widgets.count()
+    const pieces = []
+    for (let index = 0; index < count; index += 1) pieces.push(await widgets.nth(index).innerText())
+    const text = pieces.length === 0 ? undefined : pieces.join('\n')
+    const shown = text !== undefined && OWN_MARKS.every(mark => mark.test(text))
+    // Hiding must remove the actual widget, not merely lose an optional segment.
+    if (!visible && (text === undefined || !/think:/u.test(text))) return
+    if (visible && shown) {
+      // The ANSI check, and the reason it is here rather than in a unit test: the
+      // package emits real SGR codes, and a seat that shows them prints visible
+      // garbage. The unit tests cover the parser; this covers the seat.
+      if (text.includes(ESC) || /\[\d+(?:;\d+)*m/u.test(text)) {
+        throw new Error(`capture: the widget seat is showing raw ANSI escapes rather than colour:\n  ${JSON.stringify(text)}`)
+      }
+      break
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `capture: the Pi package's status line did not become ${visible ? 'visible' : 'hidden'}.`
+        + `\n  widgets held: ${JSON.stringify(text ?? null)}`,
+      )
+    }
+    await page.waitForTimeout(1000)
+  }
+}
+
+// The current original package enables itself at session_start. Verify the
+// initial render, then a real disable/enable cycle across the browser poll.
+// Seeing the pre-disable widget immediately after a command is not evidence
+// that the command changed the UI, and produced misleading screenshots.
+await waitForPowerline(true)
+await togglePowerline()
+await waitForPowerline(false)
+await togglePowerline()
+await waitForPowerline(true)
+await shot('06-presentation-surfaces')
+
+} finally {
+  await browser.close()
+}

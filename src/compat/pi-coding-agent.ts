@@ -1,0 +1,1169 @@
+// Headless @earendil-works/pi-coding-agent compatibility surface.
+//
+// Three tiers, all package-agnostic:
+//   1. Vendored Pi source (SessionManager, message transforms, truncation,
+//      compaction/summarization, skills loading, trust store, tool wrappers,
+//      file-mutation queue) — byte-level Pi semantics, see ./vendor/PI-LICENSE.
+//      Summarization model calls fill Pi's own streamFn injection point with
+//      the DSH llm bridge: one model path, no provider SDKs.
+//   2. Headless reimplementations (Theme, settings, shell/clipboard/image
+//      helpers) — same signatures, no terminal or Pi-global state.
+//   3. Host-owned capabilities (package install, standalone model stacks) —
+//      importable so packages load, but constructing them throws a structured
+//      PiCapabilityError naming the DSH-owned replacement, never a silent fake.
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { readImageDimensions } from './vendor/pi-image-dimensions.js'
+import { PiCapabilityError } from '../capability.js'
+
+export {
+  SessionManager,
+  CURRENT_SESSION_VERSION,
+  parseSessionEntries,
+  migrateSessionEntries,
+  getLatestCompactionEntry,
+  sessionEntryToContextMessages,
+  buildContextEntries,
+  buildSessionContext,
+  loadEntriesFromFile,
+  findMostRecentSession,
+  getDefaultSessionDir,
+  assertValidSessionId,
+} from './vendor/pi-session-manager.js'
+export type {
+  SessionEntry,
+  SessionHeader,
+  SessionTreeNode,
+  SessionContext,
+  SessionInfo,
+  SessionMessageEntry,
+  CompactionEntry,
+  BranchSummaryEntry,
+  CustomEntry,
+  CustomMessageEntry,
+  LabelEntry,
+  SessionInfoEntry,
+  ThinkingLevelChangeEntry,
+  ModelChangeEntry,
+} from './vendor/pi-session-manager.js'
+export {
+  convertToLlm,
+  createBranchSummaryMessage,
+  createCompactionSummaryMessage,
+  createCustomMessage,
+  bashExecutionToText,
+  COMPACTION_SUMMARY_PREFIX,
+  COMPACTION_SUMMARY_SUFFIX,
+  BRANCH_SUMMARY_PREFIX,
+  BRANCH_SUMMARY_SUFFIX,
+} from './vendor/pi-messages.js'
+export type {
+  BashExecutionMessage,
+  CustomMessage,
+  BranchSummaryMessage,
+  CompactionSummaryMessage,
+} from './vendor/pi-messages.js'
+export {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_MAX_LINES,
+  formatSize,
+  truncateHead,
+  truncateLine,
+  truncateTail,
+} from './vendor/pi-truncate.js'
+export type { TruncationOptions, TruncationResult } from './vendor/pi-truncate.js'
+export { withFileMutationQueue } from './vendor/pi-file-mutation-queue.js'
+export { getAgentDir } from './vendor/pi-config-shim.js'
+// Pre-bind extension-runtime factory, vendored byte-identical. Extensions that
+// assemble their own ResourceLoader-shaped getExtensions() result (pi-btw's
+// BTW overlay) construct one; an absent export throws at command execution.
+export { createExtensionRuntime } from './vendor/pi-extension-runtime.js'
+export type { ExtensionRuntime } from './vendor/pi-extension-runtime.js'
+// Pi's built-in tool constructors, vendored byte-identical (spawn semantics,
+// output accumulation, truncation, kill-tree, mutation queue, diff rendering)
+// — the constructor surface packages like pi-landstrip and pi-fabric build
+// their own sandboxed/filtered variants on.
+export {
+  createBashTool,
+  createBashToolDefinition,
+  createLocalBashOperations,
+  bashToolSystemPromptContribution,
+} from './vendor/pi-tools/bash.js'
+export { createReadTool, createReadToolDefinition } from './vendor/pi-tools/read.js'
+export { createEditTool, createEditToolDefinition } from './vendor/pi-tools/edit.js'
+export { createWriteTool, createWriteToolDefinition } from './vendor/pi-tools/write.js'
+export { createGrepTool, createGrepToolDefinition } from './vendor/pi-tools/grep.js'
+export { createFindTool, createFindToolDefinition } from './vendor/pi-tools/find.js'
+export { createLsTool, createLsToolDefinition } from './vendor/pi-tools/ls.js'
+
+// Pi's one-line tool-event guards (core/extensions/types.js), verbatim.
+interface ToolNamedEvent { toolName?: unknown }
+export function isToolCallEventType(toolName: string, event: ToolNamedEvent): boolean {
+  return event.toolName === toolName
+}
+export function isBashToolResult(event: ToolNamedEvent): boolean { return event.toolName === 'bash' }
+export function isReadToolResult(event: ToolNamedEvent): boolean { return event.toolName === 'read' }
+export function isEditToolResult(event: ToolNamedEvent): boolean { return event.toolName === 'edit' }
+export function isWriteToolResult(event: ToolNamedEvent): boolean { return event.toolName === 'write' }
+export function isGrepToolResult(event: ToolNamedEvent): boolean { return event.toolName === 'grep' }
+export function isFindToolResult(event: ToolNamedEvent): boolean { return event.toolName === 'find' }
+export function isLsToolResult(event: ToolNamedEvent): boolean { return event.toolName === 'ls' }
+
+import { homedir } from 'node:os'
+import { join, delimiter } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { createBashTool } from './vendor/pi-tools/bash.js'
+import { createReadTool } from './vendor/pi-tools/read.js'
+import { createEditTool } from './vendor/pi-tools/edit.js'
+import { createWriteTool } from './vendor/pi-tools/write.js'
+import { createGrepTool } from './vendor/pi-tools/grep.js'
+import { createFindTool } from './vendor/pi-tools/find.js'
+import { createLsTool } from './vendor/pi-tools/ls.js'
+import { execFile } from 'node:child_process'
+import type { AgentMessage } from './vendor/pi-types.js'
+import type { Component, SettingsListTheme, SelectListTheme } from './pi-tui.js'
+import { visibleWidth, truncateToWidth } from './vendor/pi-tui-utils.js'
+import { getAgentDir as agentDirOf } from './vendor/pi-config-shim.js'
+
+export const CONFIG_DIR_NAME = '.pi'
+export const VERSION = 'pi2dsh-compat'
+
+export function defineTool<T>(tool: T): T {
+  return tool
+}
+
+function unsupportedRuntime(name: string): never {
+  throw new Error(
+    `pi2dsh: ${name} belongs to Pi's internal agent runtime and has no verified DSH mapping; `
+    + 'use the DSH-native service instead (see the pi2dsh compatibility report)',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Theme system (headless)
+// ---------------------------------------------------------------------------
+
+const identity = (text: string): string => text
+
+export type ThemeColor = string
+export type ThemeBg = string
+export type ColorMode = 'truecolor' | '256' | '16' | 'none'
+
+export class Theme {
+  constructor(public name = 'pi2dsh-headless') {}
+  fg(_color: ThemeColor, text: string): string {
+    return text
+  }
+  bg(_color: ThemeBg, text: string): string {
+    return text
+  }
+  bold(text: string): string {
+    return text
+  }
+  italic(text: string): string {
+    return text
+  }
+  underline(text: string): string {
+    return text
+  }
+  inverse(text: string): string {
+    return text
+  }
+  strikethrough(text: string): string {
+    return text
+  }
+  getFgAnsi(_color: ThemeColor): string {
+    return ''
+  }
+  getBgAnsi(_color: ThemeBg): string {
+    return ''
+  }
+  getColorMode(): ColorMode {
+    return 'none'
+  }
+  getThinkingBorderColor(_level: unknown): (str: string) => string {
+    return identity
+  }
+  getBashModeBorderColor(): (str: string) => string {
+    return identity
+  }
+}
+
+export const theme = new Theme()
+
+export function initTheme(_themeName?: string, _enableWatcher = false): void {}
+
+export function getSettingsListTheme(): SettingsListTheme {
+  return {
+    label: (text: string, _selected: boolean) => text,
+    value: (text: string, _selected: boolean) => text,
+    description: (text: string) => text,
+    cursor: '→ ',
+    hint: (text: string) => text,
+  }
+}
+
+export function getSelectListTheme(): SelectListTheme {
+  return {
+    selectedPrefix: '→ ',
+    selectedText: identity,
+    description: identity,
+    scrollInfo: identity,
+    noMatch: identity,
+  }
+}
+
+export function getMarkdownTheme(): Record<string, unknown> {
+  return {
+    heading: identity, link: identity, linkUrl: identity, code: identity, codeBlock: identity,
+    codeBlockBorder: identity, quote: identity, quoteBorder: identity, hr: identity,
+    listBullet: identity, bold: identity, italic: identity, underline: identity,
+    strikethrough: identity, highlightCode: (code: string) => code.split('\n'),
+  }
+}
+
+const LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  '.ts': 'typescript', '.tsx': 'typescript', '.js': 'javascript', '.jsx': 'javascript',
+  '.mjs': 'javascript', '.cjs': 'javascript', '.py': 'python', '.rb': 'ruby', '.go': 'go',
+  '.rs': 'rust', '.java': 'java', '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.hpp': 'cpp',
+  '.cs': 'csharp', '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash', '.json': 'json',
+  '.yaml': 'yaml', '.yml': 'yaml', '.toml': 'ini', '.md': 'markdown', '.html': 'xml',
+  '.xml': 'xml', '.css': 'css', '.scss': 'scss', '.sql': 'sql', '.php': 'php',
+  '.swift': 'swift', '.kt': 'kotlin', '.scala': 'scala', '.lua': 'lua', '.r': 'r',
+}
+
+export function getLanguageFromPath(filePath: string): string | undefined {
+  const dot = filePath.lastIndexOf('.')
+  if (dot === -1) return undefined
+  return LANGUAGE_BY_EXTENSION[filePath.slice(dot).toLowerCase()]
+}
+
+export function highlightCode(code: string, _lang?: string): string[] {
+  return code.split('\n')
+}
+
+export class DynamicBorder implements Component {
+  constructor(private color: (str: string) => string = identity) {}
+  render(width: number): string[] {
+    return [this.color('─'.repeat(Math.max(1, width)))]
+  }
+  invalidate(): void {}
+}
+
+// ---------------------------------------------------------------------------
+// Message / compaction helpers
+// ---------------------------------------------------------------------------
+
+// Pi's compaction surface, vendored (vendor/pi-compaction.ts): the pure logic
+// is byte-aligned with Pi, and the ONE seam is the model call — Pi's own
+// streamFn injection point, which these wrappers fill with the DSH llm bridge
+// when the caller does not pass a streamFn. Every summarization model call
+// therefore runs on the single DSH llm path.
+export {
+  estimateTokens,
+  calculateContextTokens,
+  DEFAULT_COMPACTION_SETTINGS,
+  shouldCompact,
+  findCutPoint,
+  findTurnStartIndex,
+  serializeConversation,
+  prepareCompaction,
+  getLastAssistantUsage,
+  collectEntriesForBranchSummary,
+  prepareBranchEntries,
+  type CompactionResult,
+  type CompactionSettings,
+  type CompactionPreparation,
+  type CutPointResult,
+  type FileOperations,
+  type BranchPreparation,
+  type BranchSummaryResult,
+  type CollectEntriesResult,
+  type GenerateBranchSummaryOptions,
+} from './vendor/pi-compaction.js'
+import {
+  compact as vendoredCompact,
+  generateSummary as vendoredGenerateSummary,
+  generateSummaryWithUsage as vendoredGenerateSummaryWithUsage,
+  generateBranchSummary as vendoredGenerateBranchSummary,
+  DEFAULT_COMPACTION_SETTINGS,
+  type CompactionSettings,
+} from './vendor/pi-compaction.js'
+import { __getPiAiLlmBridge, complete as piAiComplete, stream as piAiStream } from './pi-ai.js'
+
+export function compact(
+  preparation: unknown,
+  model: unknown,
+  apiKey?: unknown,
+  headers?: unknown,
+  customInstructions?: unknown,
+  signal?: unknown,
+  thinkingLevel?: unknown,
+  streamFn?: unknown,
+  env?: unknown,
+  retry?: unknown,
+  callbacks?: unknown,
+): Promise<unknown> {
+  return vendoredCompact(
+    preparation as never, model, apiKey, headers, customInstructions, signal, thinkingLevel,
+    streamFn ?? __getPiAiLlmBridge(), env, retry, callbacks,
+  )
+}
+
+export function generateSummary(
+  currentMessages: unknown,
+  model: unknown,
+  reserveTokens: unknown,
+  apiKey?: unknown,
+  headers?: unknown,
+  signal?: unknown,
+  customInstructions?: unknown,
+  previousSummary?: unknown,
+  thinkingLevel?: unknown,
+  streamFn?: unknown,
+  env?: unknown,
+  retry?: unknown,
+  callbacks?: unknown,
+): Promise<string> {
+  return vendoredGenerateSummary(
+    currentMessages, model, reserveTokens, apiKey, headers, signal, customInstructions,
+    previousSummary, thinkingLevel, streamFn ?? __getPiAiLlmBridge(), env, retry, callbacks,
+  )
+}
+
+export function generateSummaryWithUsage(
+  currentMessages: unknown,
+  model: unknown,
+  reserveTokens: unknown,
+  apiKey?: unknown,
+  headers?: unknown,
+  signal?: unknown,
+  customInstructions?: unknown,
+  previousSummary?: unknown,
+  thinkingLevel?: unknown,
+  streamFn?: unknown,
+  env?: unknown,
+  retry?: unknown,
+  callbacks?: unknown,
+): Promise<unknown> {
+  return vendoredGenerateSummaryWithUsage(
+    currentMessages, model, reserveTokens, apiKey, headers, signal, customInstructions,
+    previousSummary, thinkingLevel, streamFn ?? __getPiAiLlmBridge(), env, retry, callbacks,
+  )
+}
+
+export function generateBranchSummary(entries: unknown, options: Record<string, unknown>): Promise<unknown> {
+  return vendoredGenerateBranchSummary(entries, {
+    ...options,
+    streamFn: options.streamFn ?? __getPiAiLlmBridge(),
+  } as never)
+}
+
+// ---------------------------------------------------------------------------
+// Frontmatter
+// ---------------------------------------------------------------------------
+
+// Vendored Pi frontmatter (vendor/pi-frontmatter.ts): Pi's public API returns
+// { frontmatter, body } with YAML-parsed values. An earlier reimplementation
+// here returned { attributes } with string values — same name, wrong shape.
+export { parseFrontmatter, stripFrontmatter } from './vendor/pi-frontmatter.js'
+
+// ---------------------------------------------------------------------------
+// Clipboard / image / shell helpers
+// ---------------------------------------------------------------------------
+
+export async function copyToClipboard(text: string): Promise<boolean> {
+  const attempt = (command: string, args: string[]): Promise<boolean> =>
+    new Promise(resolve => {
+      const child = execFile(command, args, error => resolve(error === null))
+      child.stdin?.write(text)
+      child.stdin?.end()
+    })
+  if (process.platform === 'darwin') return attempt('pbcopy', [])
+  if (process.platform === 'win32') return attempt('clip', [])
+  if (await attempt('wl-copy', [])) return true
+  return attempt('xclip', ['-selection', 'clipboard'])
+}
+
+export interface ImageResizeOptions {
+  /** Pi's default: 2000. */
+  maxWidth?: number
+  /** Pi's default: 2000. */
+  maxHeight?: number
+  /** Pi's default: 4.5MB of base64 payload. */
+  maxBytes?: number
+  /** Pi's default: 80. */
+  jpegQuality?: number
+}
+
+/** Pi's exact result shape: base64 payload plus both the original and final size. */
+export interface ResizedImage {
+  data: string
+  mimeType: string
+  originalWidth: number
+  originalHeight: number
+  width: number
+  height: number
+  wasResized: boolean
+}
+
+/** Pi's defaults, so a caller passing nothing gets Pi's limits. */
+const DEFAULT_MAX_BYTES = 4.5 * 1024 * 1024
+
+/**
+ * Encode an image for inline use, reporting its true dimensions.
+ *
+ * Pi resizes here, using a worker and an image codec. This bridge has no
+ * codec, so it does not resize — but it must not lie about the rest: the
+ * payload really is base64 (packages feed this straight to a model), the
+ * dimensions are read from the file header, and `wasResized` is honestly
+ * false. When the image exceeds the caller's byte budget it cannot be made to
+ * fit, so this returns `null` — Pi's own "cannot produce a usable image"
+ * answer — rather than handing back something over the limit.
+ * @param inputBytes - the complete image file.
+ * @param mimeType - the declared image type.
+ * @param options - Pi's resize budget; only `maxBytes` can be honoured here.
+ */
+export async function resizeImage(
+  inputBytes: Uint8Array,
+  mimeType: string,
+  options: ImageResizeOptions = {},
+): Promise<ResizedImage | null> {
+  const type = mimeType.split(';')[0]?.trim().toLowerCase() ?? ''
+  if (!INLINE_IMAGE_MIME_TYPES.has(type)) return null
+  const data = Buffer.from(inputBytes).toString('base64')
+  if (data.length > (options.maxBytes ?? DEFAULT_MAX_BYTES)) return null
+  const size = readImageDimensions(inputBytes, type)
+  if (size === undefined) return null
+  return {
+    data,
+    mimeType: type,
+    originalWidth: size.width,
+    originalHeight: size.height,
+    width: size.width,
+    height: size.height,
+    wasResized: false,
+  }
+}
+
+/**
+ * Pi's PNG conversion. Already-PNG input passes through; anything else needs
+ * an image codec this bridge does not carry, so it answers `null` — the same
+ * answer Pi gives when its own conversion fails, and one every caller already
+ * handles.
+ * @param base64Data - the image payload, base64 encoded.
+ * @param mimeType - its declared type.
+ */
+export async function convertToPng(
+  base64Data: string,
+  mimeType: string,
+): Promise<{ data: string, mimeType: string } | null> {
+  if (mimeType === 'image/png') return { data: base64Data, mimeType }
+  return null
+}
+
+
+
+
+// Pi's install-directory locator: PI_PACKAGE_DIR override, else a stable
+// bridge-owned location (Pi itself falls back to its executable's directory,
+// which has no meaningful equivalent inside DSH).
+export function getPackageDir(): string {
+  const override = process.env.PI_PACKAGE_DIR
+  if (override !== undefined && override.length > 0) return override
+  return join(agentDirOf(), 'package')
+}
+
+export interface StoredCredential {
+  type?: string
+  [key: string]: unknown
+}
+
+// Pi's one-off synchronous auth.json read, against the pi2dsh-owned agent
+// directory. DSH credentials stay authoritative for DSH model calls; this
+// serves packages that manage their own provider credentials Pi-style.
+export function readStoredCredential(
+  providerId: string,
+  authPath: string = join(agentDirOf(), 'auth.json'),
+): StoredCredential | undefined {
+  try {
+    const data = JSON.parse(readFileSync(authPath, 'utf8')) as Record<string, StoredCredential>
+    return data[providerId]
+  } catch {
+    return undefined
+  }
+}
+
+export interface ParsedSkillBlock {
+  name: string
+  content: string
+  [key: string]: unknown
+}
+
+// Pi's <skill_content name="..."> block parser, reimplemented over the same
+// wire shape.
+export function parseSkillBlock(text: string): ParsedSkillBlock | null {
+  const match = /<skill_content\b[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/skill_content>/u.exec(text)
+  if (match === null) return null
+  return { name: match[1]!, content: match[2]!.trim() }
+}
+
+// Vendored Pi tool wrappers (vendor/pi-tool-wrapper.ts): pure adapters from a
+// RegisteredTool/ToolDefinition to the AgentTool shape. Pi's `runner` argument
+// is used for exactly createContext() and getActiveTools(), which the pi2dsh
+// projection provides — packages composing their own agent loops get Pi's real
+// wrapping behavior.
+export { wrapRegisteredTool, wrapRegisteredTools, wrapToolDefinition, wrapToolDefinitions } from './vendor/pi-tool-wrapper.js'
+
+export function getBinDir(): string {
+  const parts = (process.env.PATH ?? '').split(delimiter)
+  return parts[0] ?? join(homedir(), '.local', 'bin')
+}
+
+// ---------------------------------------------------------------------------
+// Settings (in-memory, layered global/project like Pi)
+// ---------------------------------------------------------------------------
+
+type SettingsRecord = Record<string, unknown>
+
+export interface SettingsManagerCreateOptions {
+  [key: string]: unknown
+}
+
+export interface RetrySettings {
+  enabled: boolean
+  maxRetries: number
+  baseDelayMs: number
+}
+
+export type DefaultProjectTrust = 'ask' | 'always' | 'never'
+export type TuiMode = 'regular' | 'fullscreen'
+export type PackageSource = string | Record<string, unknown>
+
+export class SettingsManager {
+  private constructor(
+    private globalSettings: SettingsRecord,
+    private projectSettings: SettingsRecord,
+  ) {}
+
+  static create(_cwd?: string, _agentDir?: string, options: SettingsManagerCreateOptions = {}): SettingsManager {
+    return SettingsManager.inMemory({}, options)
+  }
+
+  static fromStorage(_storage: unknown, options: SettingsManagerCreateOptions = {}): SettingsManager {
+    return SettingsManager.inMemory({}, options)
+  }
+
+  static inMemory(settings: SettingsRecord = {}, _options: SettingsManagerCreateOptions = {}): SettingsManager {
+    return new SettingsManager({ ...settings }, {})
+  }
+
+  private get merged(): SettingsRecord {
+    return { ...this.globalSettings, ...this.projectSettings }
+  }
+
+  private read<T>(key: string, fallback: T): T {
+    const value = this.merged[key]
+    return value === undefined ? fallback : value as T
+  }
+
+  async reload(): Promise<void> {}
+  async flush(): Promise<void> {}
+  drainErrors(): unknown[] {
+    return []
+  }
+  applyOverrides(overrides: SettingsRecord): void {
+    Object.assign(this.globalSettings, overrides)
+  }
+  getGlobalSettings(): SettingsRecord {
+    return { ...this.globalSettings }
+  }
+  getProjectSettings(): SettingsRecord {
+    return { ...this.projectSettings }
+  }
+  isProjectTrusted(): boolean {
+    return this.read('projectTrusted', false)
+  }
+  setProjectTrusted(trusted: boolean): void {
+    this.projectSettings.projectTrusted = trusted
+  }
+  getDefaultProjectTrust(): DefaultProjectTrust {
+    return this.read('defaultProjectTrust', 'ask')
+  }
+  getDefaultProvider(): string | undefined {
+    return this.read('defaultProvider', undefined)
+  }
+  getDefaultModel(): string | undefined {
+    return this.read('defaultModel', undefined)
+  }
+  setDefaultProvider(provider: string): void {
+    this.globalSettings.defaultProvider = provider
+  }
+  setDefaultModel(model: string): void {
+    this.globalSettings.defaultModel = model
+  }
+  setDefaultModelAndProvider(model: string, provider: string): void {
+    this.setDefaultModel(model)
+    this.setDefaultProvider(provider)
+  }
+  getDefaultThinkingLevel(): string | undefined {
+    return this.read('defaultThinkingLevel', undefined)
+  }
+  getThemeSetting(): string | undefined {
+    return this.read('theme', undefined)
+  }
+  getTheme(): string | undefined {
+    return this.getThemeSetting()
+  }
+  setTheme(themeName: string): void {
+    this.globalSettings.theme = themeName
+  }
+  getCompactionSettings(): CompactionSettings {
+    return this.read('compaction', { ...DEFAULT_COMPACTION_SETTINGS })
+  }
+  getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {
+    return this.read('branchSummary', { reserveTokens: 8000, skipPrompt: false })
+  }
+  getRetrySettings(): RetrySettings {
+    return this.read('retry', { enabled: true, maxRetries: 3, baseDelayMs: 1000 })
+  }
+  getProviderRetrySettings(): RetrySettings {
+    return this.getRetrySettings()
+  }
+  getHttpIdleTimeoutMs(): number {
+    return this.read('httpIdleTimeoutMs', 120_000)
+  }
+  getWebSocketConnectTimeoutMs(): number {
+    return this.read('webSocketConnectTimeoutMs', 30_000)
+  }
+  getPackages(): PackageSource[] {
+    return this.read('packages', [])
+  }
+  getExtensionPaths(): string[] {
+    return this.read('extensions', [])
+  }
+  getSkillPaths(): string[] {
+    return this.read('skills', [])
+  }
+  getPromptTemplatePaths(): string[] {
+    return this.read('prompts', [])
+  }
+  getThemePaths(): string[] {
+    return this.read('themes', [])
+  }
+  getTuiMode(): TuiMode {
+    return this.read('tuiMode', 'regular')
+  }
+  getShowImages(): boolean {
+    return this.read('showImages', false)
+  }
+  getImageWidthCells(): number {
+    return this.read('imageWidthCells', 40)
+  }
+  getClearOnShrink(): boolean {
+    return this.read('clearOnShrink', false)
+  }
+  getShowTerminalProgress(): boolean {
+    return this.read('showTerminalProgress', false)
+  }
+  getHideThinkingBlock(): boolean {
+    return this.read('hideThinkingBlock', false)
+  }
+  getExternalEditorCommand(): string | undefined {
+    return this.read('externalEditorCommand', undefined)
+  }
+  getSteeringMode(): 'all' | 'one-at-a-time' {
+    return this.read('steeringMode', 'all')
+  }
+  getFollowUpMode(): string {
+    return this.read('followUpMode', 'queue')
+  }
+  getShellPath(): string | undefined {
+    return this.read('shellPath', undefined)
+  }
+  getShellCommandPrefix(): string | undefined {
+    return this.read('shellCommandPrefix', undefined)
+  }
+  getNpmCommand(): string[] | undefined {
+    return this.read('npmCommand', undefined)
+  }
+  getEnableSkillCommands(): boolean {
+    return this.read('enableSkillCommands', true)
+  }
+  getEnableAnalytics(): boolean {
+    return false
+  }
+  getTrackingId(): string | undefined {
+    return undefined
+  }
+}
+
+export class InMemorySettingsStorage {
+  constructor(public settings: SettingsRecord = {}) {}
+  async withLock<T>(_scope: string, fn: () => Promise<T> | T): Promise<T> {
+    return fn()
+  }
+}
+
+export class FileSettingsStorage extends InMemorySettingsStorage {}
+
+
+// Vendored Pi trust store (vendor/pi-trust-store.ts): a real locked trust.json
+// under whatever agentDir the caller passes — with the redirected getAgentDir
+// convention that is package-visible state inside the DSH-owned pi2dsh
+// directory. The DSH host never consults this file; ctx.isProjectTrusted
+// stays fail-closed because host trust is a DSH decision.
+export { ProjectTrustStore, hasTrustRequiringProjectResources } from './vendor/pi-trust-store.js'
+
+// The host's installed Pi packages, projected as "default-discovered
+// extensions": each entry is a package's DECLARED pi extension file (absolute,
+// inside the installed dir), so a creator's own filtering code — pi-subagents'
+// extensions/exclude_extensions/ext: machinery canonicalizes by basename and
+// by the owning manifest's npm short name — runs unchanged on real paths and
+// produces exactly the names it produces on Pi. The engine provides the list
+// once at apply; a composition without the engine (bare test hosts) leaves it
+// empty, which is the pre-existing headless behavior.
+let discoveredPiExtensionEntries: ReadonlyArray<{ path: string }> = []
+
+export function providePiExtensionDiscovery(entries: ReadonlyArray<{ path: string }>): void {
+  discoveredPiExtensionEntries = entries.map(entry => ({ path: entry.path }))
+}
+
+// Pi's resource loader, headless: subagent packages construct one to control
+// a child session's resources. Discovery mirrors real Pi: the default set is
+// the host's installed Pi packages (see providePiExtensionDiscovery), a
+// truthy `noExtensions` empties it, and the caller's `extensionsOverride`
+// runs over the result — the creator's own filter code, on real data. Path
+// entries (`additionalExtensionPaths`) cannot be loaded fresh on this host
+// and surface as per-entry errors, Pi's own diagnostics shape.
+export class DefaultResourceLoader {
+  readonly #options: SettingsRecord
+  /** Resolves an entry path to the LIVE Pi tool ledger of the package mounted
+   * for this loader's child — attached by the bridge after the child mount.
+   * Pi's Extension.tools shape: consumers (pi-subagents' extension tool
+   * scope) read `.keys()` off it every turn, so late registrations count. */
+  #childToolResolver: ((path: string) => ReadonlyMap<string, unknown> | undefined) | undefined
+
+  constructor(options: SettingsRecord = {}) {
+    this.#options = options
+  }
+
+  attachChildToolResolver(resolver: (path: string) => ReadonlyMap<string, unknown> | undefined): void {
+    this.#childToolResolver = resolver
+  }
+
+  getExtensions(): { extensions: unknown[], errors: unknown[] } {
+    const errors: unknown[] = []
+    const additional = this.#options.additionalExtensionPaths
+    if (Array.isArray(additional)) {
+      for (const path of additional) {
+        errors.push({
+          path: String(path),
+          error: 'path-loaded extensions are not supported on this host; install the package with `dsh plugin add <pkg>`',
+        })
+      }
+    }
+    const base = {
+      extensions: this.#options.noExtensions === true
+        ? []
+        : discoveredPiExtensionEntries.map(entry => ({
+            ...entry,
+            tools: this.#childToolResolver?.(entry.path) ?? new Map<string, unknown>(),
+          })),
+      errors,
+    }
+    const override = this.#options.extensionsOverride
+    return typeof override === 'function' ? (override as (b: unknown) => never)(base) : base
+  }
+
+  getSkills(): { skills: unknown[], diagnostics: unknown[] } {
+    return { skills: [], diagnostics: [] }
+  }
+
+  getPrompts(): { prompts: unknown[], diagnostics: unknown[] } {
+    return { prompts: [], diagnostics: [] }
+  }
+
+  getThemes(): { themes: unknown[], diagnostics: unknown[] } {
+    return { themes: [], diagnostics: [] }
+  }
+
+  getAgentsFiles(): { files: unknown[], diagnostics: unknown[] } {
+    return { files: [], diagnostics: [] }
+  }
+
+  getSystemPrompt(): string | undefined {
+    const override = this.#options.systemPromptOverride
+    return typeof override === 'function' ? (override as (b: undefined) => string | undefined)(undefined) : undefined
+  }
+
+  getSystemPromptSource(): { kind: string } {
+    return { kind: 'default' }
+  }
+
+  getAppendSystemPrompt(): string[] {
+    const override = this.#options.appendSystemPromptOverride
+    return typeof override === 'function' ? (override as (b: string[]) => string[])([]) : []
+  }
+
+  getAppendSystemPromptSources(): unknown[] {
+    return []
+  }
+
+  extendResources(_paths: unknown): void {}
+
+  async reload(_options?: unknown): Promise<void> {}
+}
+
+// Host-infrastructure classes stay unavailable BY DESIGN, as structured
+// capability errors a package can catch:
+// - DefaultPackageManager installs/removes packages — on DSH that is the
+//   user's `dsh plugin add/remove`, behind pnpm's build-script security gate.
+// - ModelRuntime composes a full standalone model stack (credentials +
+//   providers + models.json) — on DSH the ONE model directory is the host llm
+//   configuration, projected through ctx.modelRegistry.
+function hostInfrastructureClass(name: string, reason: string, guidance: string): new (...args: unknown[]) => never {
+  return class {
+    constructor() {
+      throw new PiCapabilityError({ capability: `new ${name}()`, reason, guidance })
+    }
+  } as never
+}
+
+export const DefaultPackageManager = hostInfrastructureClass(
+  'DefaultPackageManager',
+  'installing packages is owned by the DSH host and its security gates.',
+  'Add or remove plugins with: dsh plugin add/remove <package>.',
+)
+// ModelRuntime: Pi's configured Models collection (private constructor,
+// `ModelRuntime.create()` factory). Extensions reach for it to run ONE-OFF
+// tool-less completions in-process (pi-code's WebFetch prompt-over-page and
+// its `type: prompt` hooks call `completeSimple`). On DSH the model directory
+// and credentials are the host's, so the calls route through the SAME bridge
+// pi-ai's top-level complete()/stream() use — the ONE model path — and the
+// directory/credential surface (register/login/refresh/getModels…) stays a
+// structured capability error pointing at ctx.modelRegistry and the host's
+// llm settings. Nothing here fabricates a response: without a mounted llm
+// service the bridge itself fails loud.
+const MODEL_RUNTIME_FACTORY = Symbol('pi2dsh.ModelRuntime.create')
+export class ModelRuntime {
+  constructor(token?: unknown) {
+    if (token !== MODEL_RUNTIME_FACTORY) {
+      throw new PiCapabilityError({
+        capability: 'new ModelRuntime()',
+        reason: 'Pi constructs ModelRuntime only through ModelRuntime.create(); the constructor is private.',
+        guidance: 'Call ModelRuntime.create() — on DSH its model calls route through the host llm service.',
+      })
+    }
+  }
+  static async create(_options?: unknown): Promise<ModelRuntime> {
+    return new ModelRuntime(MODEL_RUNTIME_FACTORY)
+  }
+  stream(model: Record<string, unknown>, context: Record<string, unknown>, options?: Record<string, unknown>): unknown {
+    return piAiStream(model, context, options)
+  }
+  complete(model: Record<string, unknown>, context: Record<string, unknown>, options?: Record<string, unknown>): Promise<unknown> {
+    return piAiComplete(model, context, options)
+  }
+  streamSimple(model: Record<string, unknown>, context: Record<string, unknown>, options?: Record<string, unknown>): unknown {
+    return piAiStream(model, context, options)
+  }
+  completeSimple(model: Record<string, unknown>, context: Record<string, unknown>, options?: Record<string, unknown>): Promise<unknown> {
+    return piAiComplete(model, context, options)
+  }
+}
+for (const member of [
+  'getProviders', 'getProvider', 'getModels', 'getModel', 'getAvailable', 'getAvailableSnapshot', 'getError',
+  'checkAuth', 'getAuth', 'refresh', 'login', 'logout', 'setRuntimeApiKey', 'removeRuntimeApiKey', 'listCredentials',
+  'getProviderAuthStatus', 'isUsingOAuth', 'isUsingSubscription', 'hasConfiguredAuth', 'registerProvider',
+  'registerNativeProvider', 'unregisterProvider', 'getRegisteredProviderConfig', 'getRegisteredProviderIds',
+  'getRegisteredNativeProvider', 'getCompatibilityRequestConfig', 'fetchDeferred',
+]) {
+  Object.defineProperty(ModelRuntime.prototype, member, {
+    value: function unavailable(): never {
+      throw new PiCapabilityError({
+        capability: `ModelRuntime.${member}()`,
+        reason: 'the model directory and its credentials are owned by the DSH host llm configuration.',
+        guidance: "Read the directory through ctx.modelRegistry; configure gateways and logins in the host's llm settings.",
+      })
+    },
+    writable: true,
+    configurable: true,
+  })
+}
+
+export class ModelRegistry {
+  private models = new Map<string, unknown>()
+  register(id: string, model: unknown): void {
+    this.models.set(id, model)
+  }
+  get(id: string): unknown {
+    return this.models.get(id)
+  }
+  list(): unknown[] {
+    return [...this.models.values()]
+  }
+}
+
+export interface RegisteredToolRecord {
+  definition: unknown
+  sourceInfo: { path: string, source?: string, scope?: string, origin?: string }
+}
+
+// Pi's runner class, reduced to the surface tool-catalog packages actually
+// hook: pi-fabric patches `prototype.getAllRegisteredTools` to observe and
+// filter every registered tool. The pi2dsh runtime constructs one instance
+// whose provider yields the live Pi tool registrations (original definition
+// object references, so symbol-anchored detection works), and routes its own
+// tool enumeration through it — a patched prototype really filters the
+// catalog, exactly as under Pi.
+export class ExtensionRunner {
+  #provider: () => RegisteredToolRecord[]
+
+  constructor(provider?: () => RegisteredToolRecord[]) {
+    this.#provider = provider ?? (() => [])
+  }
+
+  getAllRegisteredTools(): RegisteredToolRecord[] {
+    return this.#provider()
+  }
+}
+
+// The mounted pi2dsh runtime installs the real factory: createAgentSession
+// builds a genuine DSH child agent through ctx.agents (the host loop's
+// factory) with Pi's public AgentSession surface bridged over it. Outside a
+// mounted runtime the call keeps its explicit failure.
+type SubagentSessionFactory = (options: Record<string, unknown>) => Promise<{ session: unknown }>
+// Anchored on globalThis (Symbol.for), NOT module state: the shim can be
+// alive twice in one process — the engine's own chunk plus the jiti-loaded
+// copy extensions import — and a factory installed by one copy must be
+// visible to createAgentSession() in the other. Same state-splitting class
+// the shared host state guards against ("one bridge, not per-copy silos").
+const FACTORY_STORE = globalThis as unknown as Record<symbol, unknown>
+const FACTORY_KEY = Symbol.for('pi2dsh.subagentSessionFactory')
+const SCOPED_FACTORY_KEY = Symbol.for('pi2dsh.scopedSubagentSessionFactory')
+FACTORY_STORE[SCOPED_FACTORY_KEY] ??= new AsyncLocalStorage<SubagentSessionFactory | undefined>()
+const scopedSubagentSessionFactory = FACTORY_STORE[SCOPED_FACTORY_KEY] as AsyncLocalStorage<SubagentSessionFactory | undefined>
+const subagentSessionFactory = (): SubagentSessionFactory | undefined =>
+  FACTORY_STORE[FACTORY_KEY] as SubagentSessionFactory | undefined
+
+export function __setSubagentSessionFactory(factory: SubagentSessionFactory | undefined): void {
+  FACTORY_STORE[FACTORY_KEY] = factory
+}
+
+/** Run extension-owned work with the exact Agent runtime's child-session factory. */
+export function __runWithSubagentSessionFactory<T>(
+  factory: SubagentSessionFactory | undefined,
+  callback: () => T,
+): T {
+  return scopedSubagentSessionFactory.run(factory, callback)
+}
+
+export async function createAgentSession(options: Record<string, unknown> = {}): Promise<{ session: unknown }> {
+  const factory = scopedSubagentSessionFactory.getStore() ?? subagentSessionFactory()
+  if (factory === undefined) {
+    return unsupportedRuntime('createAgentSession() outside a mounted pi2dsh runtime')
+  }
+  return factory(options)
+}
+
+// Byte-identical to Pi's own composition of its built-in tool constructors
+// (core/tools/index.js): coding = read+bash+edit+write, read-only =
+// read+grep+find+ls.
+export function createCodingTools(cwd: string, options?: Record<string, { [key: string]: unknown } | undefined>): unknown[] {
+  return [
+    createReadTool(cwd, options?.read),
+    createBashTool(cwd, options?.bash),
+    createEditTool(cwd, options?.edit),
+    createWriteTool(cwd, options?.write),
+  ]
+}
+
+export function createReadOnlyTools(cwd: string, options?: Record<string, { [key: string]: unknown } | undefined>): unknown[] {
+  return [
+    createReadTool(cwd, options?.read),
+    createGrepTool(cwd, options?.grep),
+    createFindTool(cwd, options?.find),
+    createLsTool(cwd, options?.ls),
+  ]
+}
+
+// Vendored Pi skills loader (vendor/pi-skills-load.ts): real directory
+// discovery with Pi's exact rules (SKILL.md roots, ignore files, symlink
+// dedup, name/description validation). Default locations resolve through the
+// redirected getAgentDir, i.e. inside the DSH-owned pi2dsh directory.
+export { loadSkills, loadSkillsFromDir } from './vendor/pi-skills-load.js'
+
+// ---------------------------------------------------------------------------
+// Headless host services backing the vendored built-in tools. Each mirrors a
+// documented Pi behavior for environments without the full interactive host:
+// ensureTool matches Pi's own offline mode (find on PATH, never download);
+// highlightCode matches Pi's no-language branch (plain lines — the headless
+// theme applies no styling anyway); processImage passes supported formats
+// through un-resized (Pi's resize/convert path runs a WASM codec that has no
+// place in a headless bridge; oversized or exotic images degrade with Pi's
+// own omission message).
+// ---------------------------------------------------------------------------
+
+export function getReadmePath(): string {
+  return join(getPackageDir(), 'README.md')
+}
+
+const MANAGED_HOST_TOOLS = new Set(['rg', 'fd'])
+
+export function getToolPath(tool: string): string | undefined {
+  const pathKey = Object.keys(process.env).find(key => key.toLowerCase() === 'path') ?? 'PATH'
+  for (const dir of (process.env[pathKey] ?? '').split(delimiter)) {
+    if (dir.length === 0) continue
+    const candidate = join(dir, process.platform === 'win32' ? `${tool}.exe` : tool)
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
+export async function ensureTool(tool: string, _silent = false): Promise<string | undefined> {
+  const existing = getToolPath(tool)
+  if (existing !== undefined) return existing
+  // Pi's offline mode semantics: a managed tool that is not on PATH is
+  // reported unavailable instead of downloaded.
+  return MANAGED_HOST_TOOLS.has(tool) ? undefined : undefined
+}
+
+const INLINE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
+
+export async function processImage(
+  bytes: Uint8Array,
+  mimeType: string,
+  _options?: { autoResizeImages?: boolean },
+): Promise<
+  | { ok: true, data: string, mimeType: string, hints: string[] }
+  | { ok: false, message: string }
+> {
+  const base = mimeType.split(';')[0]?.trim().toLowerCase() ?? ''
+  if (!INLINE_IMAGE_MIME_TYPES.has(base)) {
+    return { ok: false, message: '[Image omitted: could not be converted to a supported inline image format.]' }
+  }
+  return {
+    ok: true,
+    data: Buffer.from(bytes).toString('base64'),
+    mimeType: base,
+    hints: ['[Image passed through unresized by pi2dsh.]'],
+  }
+}
+
+
+
+export { formatSkillsForPrompt } from './vendor/pi-skills-format.js'
+
+// Pi's own implementations, vendored. Hand-written stand-ins for these three
+// diverged from Pi in ways a package cannot see: a shell picked from $SHELL
+// where Pi is bash-only, head-truncation where Pi keeps the tail, and a diff
+// renderer with a different signature entirely.
+export { getShellConfig, type ShellConfig } from './vendor/pi-shell-config.js'
+export { truncateToVisualLines } from './vendor/pi-tools/visual-truncate.js'
+export { renderDiff } from './vendor/pi-tools/diff-component.js'
+
+export function createEventBus(): {
+  emit(channel: string, data: unknown): void
+  on(channel: string, handler: (data: unknown) => void): () => void
+  clear(): void
+} {
+  const handlers = new Map<string, Set<(data: unknown) => void>>()
+  return {
+    emit(channel, data) {
+      for (const handler of handlers.get(channel) ?? []) {
+        Promise.resolve().then(() => handler(data)).catch(error => console.error(error))
+      }
+    },
+    on(channel, handler) {
+      const set = handlers.get(channel) ?? new Set()
+      set.add(handler)
+      handlers.set(channel, set)
+      return () => {
+        set.delete(handler)
+      }
+    },
+    clear() {
+      handlers.clear()
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive-mode UI components (headless)
+// ---------------------------------------------------------------------------
+
+class HeadlessComponent implements Component {
+  render(_width: number): string[] {
+    return []
+  }
+  invalidate(): void {}
+}
+
+export class ToolExecutionComponent extends HeadlessComponent {}
+export class FooterComponent extends HeadlessComponent {}
+export class BorderedLoader extends HeadlessComponent {
+  start(): void {}
+  stop(): void {}
+  dispose(): void {}
+}
+export class CustomMessageComponent extends HeadlessComponent {}
+export class AssistantMessageComponent extends HeadlessComponent {}
+export class UserMessageComponent extends HeadlessComponent {}
+export class ExtensionSelectorComponent extends HeadlessComponent {}
+export class ExtensionInputComponent extends HeadlessComponent {}
+export class ExtensionEditorComponent extends HeadlessComponent {}
+export class SettingsSelectorComponent extends HeadlessComponent {}
+
+export class CustomEditor extends HeadlessComponent {
+  private text = ''
+  onSubmit?: (text: string) => void
+  onChange?: (text: string) => void
+  getText(): string {
+    return this.text
+  }
+  setText(text: string): void {
+    this.text = text
+    this.onChange?.(text)
+  }
+  handleInput(data: string): void {
+    if (data === '\r' || data === '\n') {
+      this.onSubmit?.(this.text)
+      return
+    }
+    if (data >= ' ') this.setText(this.text + data)
+  }
+}
+
+export interface ToolExecutionOptions {
+  [key: string]: unknown
+}
+export interface SettingsConfig {
+  [key: string]: unknown
+}
+export interface SettingsCallbacks {
+  [key: string]: unknown
+}
+export interface RenderDiffOptions {
+  [key: string]: unknown
+}
+
+
+
+export interface VisualTruncateResult {
+  visualLines: string[]
+  skippedCount: number
+}
+
+
+
+export function keyHint(keybinding: string, description: string): string {
+  return `${keybinding} ${description}`
+}
+
+export function keyText(keybinding: string): string {
+  return keybinding
+}
+
+export function rawKeyHint(key: string, description: string): string {
+  return `${key} ${description}`
+}

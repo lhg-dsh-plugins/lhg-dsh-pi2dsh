@@ -1,0 +1,718 @@
+# Pi → DSH 架构模型
+
+这是可扩展的 Markdown 知识树，不是接口总表，也不是 `Pi × DSH` 的机械矩阵。每个稳定
+标题代表一条架构分支；接口、模块和 seam 是可以继续增长的叶子。
+
+当前发布版本：**2026-10-19，Pi 0.84.1，DSH 0.2.1-rc.2**；
+[实测范围与边界](../community/release-0.27.0/README.md)独立记录，不外推历史证据。
+此前发布基线为 pi2dsh 0.26.0 / DSH 0.2.0-rc.2。
+
+最初盘点快照：**2026-08-20，Pi 0.84.1，DSH 0.1.0-rc.8**。最初从 Pi 声明和运行时
+规则中盘到 111 条上游形状规则，从 DSH 官方 subsystem 索引中看到 45 个模块。111 尚未
+把所有嵌套对象拆成 callable，45 也不包含以后发现的全部 service、waterfall、event 和
+client seam；两个数字都不表示“已经完整”。
+
+## 生命周期语义模型：两种世界形状（2026-08-22 审计）
+
+<a id="lifecycle-semantics"></a>
+
+一切全局/会话归属判断的理论地基。对照真 Pi 源码钉死（坐标见各条），
+不是印象派。
+
+**Pi 是"单活跃会话的进程"，运行时没有跨会话全局层。** 三层：
+
+1. **磁盘持久**：auth.json、models.json、models-store.json、trust.json、
+   settings、session JSONL。跨会话延续只靠这些文件。
+2. **会话共享**：ModelRuntime、SettingsManager、ResourceLoader、事件总线
+   （loader.ts:550 单条 bus 发给该会话全部扩展）、工具注册表、TUI 主题、
+   按加载顺序串行分发的 ExtensionRunner。每次 `/new`、resume、fork、
+   `ctx.reload` 都整套重建（agent-session-runtime.ts:226-260 teardown 后
+   `createRuntime` → agent-session-services.ts:140 连 ModelRuntime 都新建）
+   并**重跑扩展工厂**（loader 只缓存工厂函数不缓存实例，loader.ts:508 每次
+   `await factory(api)`）。`session_start` 对一个实例恰好发一次
+   （agent-session.ts:2258）。
+3. **扩展私有**：各扩展自己的 tools/commands/handlers/renderers/flags/
+   shortcuts 收集器。
+
+**DSH 是"多会话共存的系统"**：llm 目录、凭证、设置、web 服务器是系统级
+服务，会话（agent）只是系统里的一种资源。Pi 的"进程启动"与"会话启动"
+是同一瞬间；DSH 把这一个瞬间拆成两个（进程可以先于任何会话存在）。
+
+**归属翻译判据**（死规则，按 API 面名字判定，无骑墙面）：
+
+| Pi 层 | DSH 落点 |
+| --- | --- |
+| 磁盘持久 | host 存储 / DSH 官方服务（credentials、settings） |
+| 会话共享 | **agent 级共享**（同一 agent 的所有包共享一条事件总线、一个主题；不是包私有） |
+| 扩展私有 | 包 × 会话实例（`agent/created` 驱动，dispose unwind） |
+| 宿主消费的注册面 | 只有 provider 一族（registerProvider / registerNativeProvider，含 OAuth 定义）；沉淀进 host 共享账本，随插件卸载退场而非会话结束退场 |
+
+**已拍板（2026-08-22）：零会话时刻的世界形状 = 路线 B（锚），维持现状。**
+工厂是不透明代码、Pi 无声明清单，宿主想知道插件里有什么只有跑工厂一条路。
+候选两条路线：
+
+- **路线 A：完整模拟单会话世界 + 产品调整。** 工厂只在会话里跑（次数与
+  Pi 完全一致），host 账本由第一个会话沉淀。代价：每次进程启动到第一个
+  会话之间，已安装插件的 provider/登录入口在系统面（模型目录、登录面板、
+  设置）不可见——TUI 无感（启动即建会话），web 首页可见空窗，且引擎启动
+  期的存量凭证恢复拿不到包定义的 transport、native 路由要等第一个会话。
+  产品上需要把"插件能力在会话里才存在"变成 DSH 用户可理解的体验。
+- **路线 B（现状实现）：锚。** 引擎启动时完整跑一遍工厂承担"启动即加载"
+  半边：只取 provider 半边、会话半边只记账不挂、永不接收会话事件；每会话
+  再跑取会话半边、provider 半边进共享账本去重。代价：工厂运行次数 =
+  会话数 + 1（重跑的副作用与非确定性本是 Pi 契约属性——Pi 每次换会话同样
+  重跑，清理责任在插件的 session_shutdown；锚唯一新颖处是那次运行永远没有
+  后续 session_start，遵守契约的插件观察不到）。
+- 两条路线都**禁止磁盘影子清单**（持久化上次运行的注册回放）：第二份权威
+  store，插件更新后必然过期。
+- 判断依据不是机制数字的整齐，而是产品语义：`dsh plugin add` 是系统级
+  动作，装完之后零会话时系统面就该看得见它——这是 DSH 语义；路线 A 的
+  "产品调整"实质是让 DSH 用户理解 Pi 的"会话即世界"哲学，构成用户面
+  Pi 泄漏（用户面界线铁律）。裁决理由还有两条：① "提前建会话抹空窗"
+  绕不开死结——首页时刻用户尚未选工作区，插件建出的只能是挂宿主 cwd 的
+  幽灵会话，即"对插件谎称在会话里"的不诚实版锚，语义污染比多跑一次
+  工厂严重；② 路线 A 的成立前提是宿主产品形态变化（web 打开即进
+  工作区，TUI 形状）——命运不在仓外插件手里。若宿主未来真变成该形态，
+  切换到 A 是纯减法（删锚即可，沉淀账本与会话实例不动）。
+- **Pi 本家佐证：Pi 没有零会话状态，"会话之外要知道插件内容"时 Pi 的
+  官方做法就是造一个幽灵会话。** `pi --list-models` 和 `pi --help` 都
+  不跳过会话，而是 `SessionManager.inMemory(cwd)` 造一个内存会话
+  （main.ts:366-368），走完整 createRuntime——工厂全跑、扩展 provider
+  全注册——再从中取数据（--help 要列出扩展注册的 flags，main.ts:858；
+  --list-models 从该会话的 modelRuntime 列模型，main.ts:866）；
+  `--no-session` 的含义是"不落盘"，不是"没有会话"。pi-server（web
+  形态地基，实验包）把无会话的 `listModels` 留作嵌入方接口、仓内无
+  实现者。锚 = 同一思路在长驻进程上的适配：Pi 的短命进程用完即弃的
+  内存幽灵会话，在 DSH 长驻进程里变成常驻锚，且锚把"我不是会话"做
+  诚实了（不发会话事件、会话面只记账）。
+
+相关叶子：[扩展实例作用域](#pi-extension-instance-scope)、
+[模型注册](#pi-model-registry)。工作准则里的操作判据见 CLAUDE.md 第三节
+（指路，不复写理论）。
+
+## Pi 能力树
+
+### 工具与执行
+
+<a id="pi-tools-registry"></a>
+#### 工具注册与可见性
+
+- 当前接口叶子：`registerTool`、`getActiveTools`、`getAllTools`、`setActiveTools`；
+  `unregisterTool` 是桥扩展，不计入上游快照。
+- 理论对应：[DSH / 工具、执行与隔离](#dsh-execution)。
+- 需要的公开 seam：`ctx.tools` 注册表与按 Agent 控制可见性。
+- 理论判断：直接承接。
+
+<a id="pi-tools-boundaries"></a>
+#### 工具执行边界
+
+- 当前接口叶子：`tool_execution_start`、`tool_execution_end`。
+- 理论对应：[DSH / 工具、执行与隔离](#dsh-execution)与
+  [DSH / 会话与持久化](#dsh-session)。
+- 需要的公开 seam：工具执行生命周期与可持久化工具事件。
+- 理论判断：组合承接。
+
+<a id="pi-tools-update"></a>
+#### 工具部分结果更新
+
+- 当前接口叶子：`tool_execution_update`。
+- 理论对应：[DSH / 工具、执行与隔离](#dsh-execution)与
+  [DSH / 会话与持久化](#dsh-session)。
+- 需要的公开 seam：对原生与迁移工具都生效的 partial-result 通道。
+- 理论判断：尚待确认公开 seam 是否完整。
+
+<a id="pi-tools-policy"></a>
+#### 工具调用与结果策略
+
+- 当前接口叶子：`tool_call`、`tool_result`。
+- 理论对应：[DSH / 工具、执行与隔离](#dsh-execution)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：执行前参数策略与结果提交前策略。
+- 理论判断：组合承接。
+
+<a id="pi-tools-process"></a>
+#### 进程执行
+
+- 当前接口叶子：`exec`、`user_bash`。
+- 理论对应：[DSH / 工具、执行与隔离](#dsh-execution)。
+- 需要的公开 seam：`ctx.exec`、subprocess provider。
+- 理论判断：直接承接。
+
+非交互 `pi -p` 是额外的 CLI 协议叶子：本地 POSIX subprocess 的临时入口把参数交给
+既有 `ctx.agents.create` 子会话桥，模型、工具、权限和会话仍归 DSH。执行器保留原包的
+watchdog；超时或连接断开取消原生 child。只选择已经安装的扩展，不在运行时装包。
+远端执行 provider 不注入本机 PATH/socket。`--no-session` 的 Pi 文件与索引可抑制，
+但 DSH 原生审计仍存在，这一保留语义差异归 `DSH-ARCH-007`，不能声明真正不落盘。
+
+### 命令与输入
+
+<a id="pi-commands-registry"></a>
+#### 命令注册
+
+- 当前接口叶子：`registerCommand`、`getCommands`。
+- 理论对应：[DSH / 命令与人机交互](#dsh-interaction)。
+- 需要的公开 seam：`ctx.commands`。
+- 当前投影：命令先进入同一个 DSH commands registry；活跃终端公开声明的 native command
+  拥有原名，Pi 插件撞名时使用 `pi-` 来源前缀，两个普通 Pi 来源撞名时使用编号别名。
+  pi2dsh 自带的兼容性兜底命令（例如 `/login`）在宿主已有同名命令且消费相同 DSH
+  authorization 权威时不重复注册；若终端服务晚到，公开 service injection 会撤销
+  先前的备用命令，避免遮挡原生登录。dsh-pi-tui 使用 API 2 的公开 raw-component/
+  footer surface，入口经 DSH Loader.import 解析宿主依赖，不绕过宿主另装一套核心。
+- `getCommands()` 的文件型 skill 描述符由 `ctx.skills.list/get` 取得：使用实际文件路径，
+  在会话启动和命令边界刷新，不复制另一个 skill registry。无文件的 opaque skill 不造路径。
+- 理论判断：直接承接。
+
+<a id="pi-commands-controls"></a>
+#### Flag 与快捷键
+
+- 当前接口叶子：`registerShortcut`、`registerFlag`、`getFlag`。
+- 理论对应：[DSH / 命令与人机交互](#dsh-interaction)与
+  [DSH / 客户端与 Web](#dsh-client)。
+- 需要的公开 seam：命令描述符与客户端输入绑定。
+- 理论判断：组合承接。
+
+<a id="pi-input-preprocess"></a>
+#### 用户输入预处理
+
+- 当前接口叶子：`input` 事件。
+- 理论对应：[DSH / 插件组合](#dsh-composition)与
+  [DSH / 会话与持久化](#dsh-session)。
+- 需要的公开 seam：用户输入成为持久 step 前的 `agent/pre-step`。
+- 理论判断：直接承接；当前桥接仍待完成。
+
+### 消息与 Agent
+
+<a id="pi-messages-injection"></a>
+#### 消息注入
+
+- 当前接口叶子：`sendMessage`、`sendUserMessage`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：`agent/pre-step` 与原生 session message append。
+- 理论判断：组合承接。
+
+<a id="pi-messages-stream"></a>
+#### 消息流事件
+
+- 当前接口叶子：`message_start`、`message_update`、`message_end`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 模型运行时](#dsh-model-runtime)。
+- 需要的公开 seam：LLM stream、提交前与持久化后的消息生命周期。
+- 理论判断：组合承接；`message_end` replacement 仍待验证。
+
+<a id="pi-context-transform"></a>
+#### 模型上下文变换
+
+- 当前接口叶子：`context`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：权威模型请求发出前的 context projection。
+- 理论判断：组合承接。
+
+<a id="pi-agent-lifecycle"></a>
+#### Agent 与轮次生命周期
+
+- 当前接口叶子：`before_agent_start`、`agent_start`、`agent_settled`、`agent_end`、
+  `turn_start`、`turn_end`。
+- 理论对应：[DSH / 插件组合](#dsh-composition)与
+  [DSH / 会话与持久化](#dsh-session)。
+- 需要的公开 seam：Agent waterfalls 与持久 turn/step 事件。
+- 理论判断：组合承接。
+
+<a id="pi-extension-instance-scope"></a>
+#### 扩展实例作用域（每会话一份）
+
+- 当前接口叶子：`ExtensionFactory` 每 session 实例化一次；`session_start` 异步
+  handlers 在第一轮前完成；session 结束时实例随之销毁。
+- 理论对应：[DSH / 插件组合](#dsh-composition)与
+  [DSH / Agent 编排](#dsh-orchestration)。
+- 需要的公开 seam：DSH 0.2 串行等待的 `agent/created` 与 `agent.ctx`。
+  创建监听器直接返回插件加载 promise；宿主在监听器完成前保持初始化活动，
+  首次提示词与工具收集因此读取已经就绪的注册表。普通插件不需要占有创建方的 setup。
+- 理论判断：直接承接。根 Agent 和 opt-in 的 DSH 原生子 Agent 都沿串行创建事件挂载；
+  Pi 发起的子 Agent 保留创建者的资源筛选与独立挂载。宿主锚只持有 Provider 等共享注册。
+- 新版移除首次 assembly 补工具快照与 pre-execute 初始化门。后加载引擎显式等待
+  已有根 Agent 的补挂载；动态工具变化仍归 DSH 的工具注册表与请求投影所有。
+  历史宿主路径保存在 v0.25.2 检查点，不进入 0.26 的运行时分支。
+
+<a id="pi-agent-control"></a>
+#### Agent 控制与空闲状态
+
+- 当前接口叶子：`isIdle`、`hasPendingMessages`、`waitForIdle`、`abort`、`signal`。
+- 理论对应：[DSH / 插件组合](#dsh-composition)与
+  [DSH / Agent 编排](#dsh-orchestration)。
+- 需要的公开 seam：队列、取消信号与 Agent 生命周期。
+- 理论判断：组合承接。
+
+<a id="pi-prompt-usage"></a>
+#### 上下文用量检查
+
+- 当前接口叶子：`getContextUsage`。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)与
+  [DSH / 会话与持久化](#dsh-session)。
+- 需要的公开 seam：token-meter、模型窗口与 session projection。
+- 理论判断：组合承接；当前桥接仍待完成。
+
+<a id="pi-prompt-system"></a>
+#### 系统提示词检查
+
+- 当前接口叶子：`getSystemPrompt`、`getSystemPromptOptions`。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)。
+- 需要的公开 seam：`system-prompt/assemble` 与当前提示词投影。
+- 理论判断：组合承接。
+
+### 会话
+
+<a id="pi-session-custom-facts"></a>
+#### 自定义持久事实
+
+- 当前接口叶子：`appendEntry`、`setLabel`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 客户端与 Web](#dsh-client)。
+- 理论需要：namespaced durable session fact，能安全恢复、分支、压缩和回放。
+- 当前公开 seam：没有完整入口；仓外插件不能安全注册并追加自定义持久事件。
+- 理论判断：缺公开 seam。
+
+<a id="pi-session-naming"></a>
+#### 会话命名
+
+- 当前接口叶子：`setSessionName`、`getSessionName`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 客户端与 Web](#dsh-client)。
+- 需要的公开 seam：原生 session title 状态与客户端投影。
+- 理论判断：直接承接。
+
+<a id="pi-session-lifecycle"></a>
+#### 会话生命周期
+
+- 当前接口叶子：`session_start`、`session_shutdown`、`session_info_changed`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：会话生命周期事实与插件 disposal。
+- 理论判断：组合承接。
+
+<a id="pi-session-operations"></a>
+#### 会话创建、分支与导航操作
+
+- 当前接口叶子：`newSession`、`fork`、`navigateTree`、`switchSession`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / Agent 编排](#dsh-orchestration)。
+- 需要的公开 seam：`ctx.sessions` create/fork/navigation。
+- 理论判断：组合承接。
+
+<a id="pi-session-navigation-events"></a>
+#### 会话导航策略与事件
+
+- 当前接口叶子：`session_before_switch`、`session_before_fork`、
+  `session_before_tree`、`session_tree`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：宿主所有入口共用的 session navigation pre/post 生命周期。
+- 理论判断：组合承接；宿主 UI 发起的操作仍待桥接验证。
+
+<a id="pi-session-compaction-operation"></a>
+#### 会话压缩操作与结果
+
+- 当前接口叶子：`compact`、`session_compact`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)。
+- 需要的公开 seam：compaction operation 与持久完成事件。
+- 理论判断：直接承接。
+
+<a id="pi-session-compaction-policy"></a>
+#### 压缩前决策
+
+- 当前接口叶子：`session_before_compact`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 插件组合](#dsh-composition)。
+- 理论需要：压缩执行前可取消或替换摘要的 waterfall。
+- 当前公开 seam：只有压缩发生后的事实事件，没有完整的事前决策入口。
+- 理论判断：缺公开 seam。
+
+<a id="pi-session-host-context"></a>
+#### 会话宿主上下文与重载
+
+- 当前接口叶子：`sessionManager`、`cwd`、`mode`、`shutdown`、`reload`。
+- 理论对应：[DSH / 会话与持久化](#dsh-session)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：session service、workspace scope 与 Cordis reload。
+- 理论判断：组合承接。
+
+`getSessionFile()` 的文件消费者需要单独验证，不能拿 `getEntries()` 的实时投影替代。
+2026-09-10 的 pi-hermes-memory 消费者证明：只提供身份头不满足文件读取契约。修复后，
+API 读取使用公开 `snapshotEvents()`（旧代回退 `events`），文件消费者获得原生记录的
+完整 Pi 格式导出，历史通过公开 persistence `inspect` / read handle 回填。导出不是
+恢复权威，修改它不改变原生历史；但它仍是磁盘 sidecar，按本标准属于 **3 级适配**。
+这个文件契约问题是桥欠账，不是 DSH 缺会话数据。
+
+### 模型
+
+<a id="pi-model-provider-registration"></a>
+#### Provider 注册
+
+- 当前接口叶子：`createProvider`、`envApiKeyAuth`、各协议的 lazy API factory、
+  `registerProvider`、`unregisterProvider`、动态 `refreshModels`。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：`llm.registerAdapter`、configurable provider schema、credentials、settings。
+- 理论判断：组合承接。带 transport 的 provider 保留自己的协议 factory，经
+  `llm.registerAdapter` 成为原生路由；首次使用动态目录里尚未出现在启动快照的模型时，
+  中间层必须等待并合并 provider 的 catalog refresh，再把完整 Pi Model 交给 transport。
+  只声明目录的 provider 仍翻译给官方 configurable-provider schema，不能借动态刷新之名
+  偷建第二条传输。
+
+<a id="pi-provider-oauth-login"></a>
+#### Provider OAuth 登录面
+
+- 当前接口叶子：provider 配置的 `oauth.login`（含 device-code、浏览器回调、短链）、
+  Pi 凭证链的 stored-credential 优先与双检锁刷新。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)；0.1.1 线新增的官方
+  `dsh-authorization` 服务（`registerFlow`/`begin`/record 见证/`authorization/settled`）。
+- 需要的公开 seam：`ctx.authorization`（0.1.1 线）、`credentials/record-updated`、
+  credentials record 一族（readRecord/modifyRecord/deleteRecord）。
+- 理论判断：组合承接，且按代分支。两代共有的用户入口是引擎的 `/login <id>`（Pi 包
+  自己的 login 实现跑在中间层的 UI 适配上）。0.1.1 线上每个 OAuth provider 另投影为
+  官方 authorization flow（key `pi2dsh/<id>`，label 带 "(pi2dsh)"）：flow 的 run 与
+  /login 同一条 spine，凭证仍落中间层 Pi 格式存储，DSH credential record 只作 seam
+  要求的 commit 见证；官方 `deleteRecord` 通过 `credentials/record-updated` 镜像回
+  Pi 存储（无 transport 的登录占位路由随之退场）。挂钩用官方
+  `ctx.inject(['authorization','credentials'], …)` 模式（llm-pi-ai 同款）：stock
+  组合只带包不组合服务、也没有任何 stock 面调用 `begin()`（2026-08-22 对
+  0.1.1-rc.2 组合 dump 实证：93 项无 authorization），服务何时组合进来都能挂上。
+  同 id 不同 scope 与官方目录 flow 并存（scope 即命名空间；官方 flow 的凭证只有
+  llm-pi-ai 路由能消费，我们的 flow 授权的才是中间层实际服务的路由）。
+  真机证据：`community/authorization-seam-e2e.json`（stock rc2 CLI 双 surface）。
+- **0.1.2-alpha.1 分支（2026-08-29）**：官方笔记明写 pi-ai catalog 登录因 ToS
+  移交 out-of-tree 插件（主动腾位），并为此开出两个新公开 client seam——
+  `settings.models.provider-card`（keyed slot，entryKey = 行的 settingsNs）与
+  `settings.models.footer`（list slot）。中间层的登录卡落座于此：引擎侧
+  `/pi2dsh/login-state` + `/pi2dsh/login-action` 两路由把 `/login` 同一条 spine
+  暴露为 poll/answer 表面（begin/answer/cancel/dismiss/signout），client 侧
+  footer 挂全量签入目录、provider-card 键 `llm-pi-ai` 做已登录行原位扩展。
+  两个真机实证的约束：① **Models 页只渲染 configured 行**（未声明 configurable
+  的 bridge transport 路由没有行，per-row 卡挂不上——签出态入口必须走 footer）；
+  ② `OAuthUiSurface.deviceCode` 的契约是 **resolve 即视为用户取消**
+  （oauthInteraction 在其 then 里 cancel 整个 flow），任何适配器实现必须挂到
+  flow signal 的 abort 才 resolve——立即 resolve 的写法会把设备码流当场掐死
+  （契约测试 tests/login-card-routes.spec.ts 抓获，authorization-seam 适配器
+  存量同款已一并修）。真机证据：`community/seam-evidence/54-logincard-directory.png`、
+  `55-logincard-device-flow.png`（alpha web + 真 pi-provider-kimi-code 包 +
+  真 Kimi 设备码端点）。
+
+<a id="pi-model-registry"></a>
+#### 模型目录视图
+
+- 当前接口叶子：`model`、`scopedModels`、`modelRegistry`、`hasConfiguredAuth`。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)。
+- 需要的公开 seam：DSH 权威模型目录与凭证可用性。
+- 理论判断：直接承接。
+
+<a id="pi-model-designated-call"></a>
+#### 目录模型的指定调用
+
+- 当前接口叶子：`modelRegistry.complete`、`modelRegistry.getProvider()`、
+  `Provider.stream`、`Provider.streamSimple`、`getApiKeyAndHeaders`、
+  `pi-ai/compat.completeSimple`、`pi-ai/compat.streamSimple`。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)与
+  [DSH / 资源与附件](#dsh-resources)。
+- 需要的公开 seam：`llm.stream`、credentials、attachments，以及 Pi 内联图片与 DSH
+  attachment ref 的双向转换。
+- 理论判断：组合承接。模型能在目录里被找到，只证明“可发现”；只有指定调用真的带着
+  文本、图片、凭证和取消信号到达该 route，才证明“可调用”。
+
+<a id="pi-model-selection"></a>
+#### 模型与推理档位选择
+
+- 当前接口叶子：`setModel`、`getThinkingLevel`、`setThinkingLevel`、`thinkingLevel`、
+  `model_select`、`thinking_level_select`。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)与
+  [DSH / 客户端与 Web](#dsh-client)。
+- 需要的公开 seam：权威模型目录与 request-level reasoning options。
+- 理论判断：组合承接。
+
+子代理的创建参数须在子代理自己的 `agent.ctx.on("agent/request", ...)` 公开 waterfall
+应用；新版 scope 不把子代理事件送给父作用域。`thinkingLevel=off` 是显式配置，
+不能当作缺省值丢弃。原包后台 `pi -p --thinking off` 已通过真实 request/header 验证。
+
+<a id="pi-model-wire"></a>
+#### Provider 网络请求生命周期
+
+- 当前接口叶子：`before_provider_request`、`before_provider_headers`、
+  `after_provider_response`。
+- 理论对应：[DSH / 模型运行时](#dsh-model-runtime)与
+  [DSH / 插件组合](#dsh-composition)。
+- 理论需要：已有 adapter 最终 request/response 周围的 transport middleware。
+- 当前公开 seam：插件拥有整条 transport 时，Pi 标准 stream helper 的 `onPayload` 可把
+  最终请求体交给 pi2dsh waterfall，再由 DSH `llm.registerAdapter` 承载；增强 DSH 原生
+  adapter 时没有通用入口。
+- 理论判断：分支承接。package-owned transport 的 `before_provider_request` 可做可靠翻译；
+  `before_provider_headers`、`after_provider_response` 以及 DSH-native transport 的同类增强
+  仍缺公开 seam，不能伪装成已经支持。
+
+### UI 与宿主呈现
+
+<a id="pi-ui-questions"></a>
+#### 阻塞式用户提问
+
+- 当前接口叶子：`select`、`confirm`、UI `input`、`editor`。
+- 理论对应：[DSH / 命令与人机交互](#dsh-interaction)与
+  [DSH / 客户端与 Web](#dsh-client)。
+- 需要的公开 seam：`ctx.userQuestions` 与原生客户端渲染。
+- 当前投影：Pi 把终端的一整块多行文案放在 dialog title；DSH 把它拆成纯文本
+  `question` 与原生 `detail`。pi2dsh 以首行为标题、其余为正文；Web detail 使用
+  Markdown 链接，dsh-TUI detail 保留 OSC 8，两个 surface 都去掉重复裸 URL，且
+  不把控制序列显示给用户；`ExtensionUIDialogOptions`
+  的 `signal`/`timeout` 透传到 DSH 问题撤销语义，所以浏览器自动回调赢得 OAuth
+  竞速时，TUI 与 Web 都立即撤掉手工粘贴框。
+- 理论判断：组合承接。
+
+<a id="pi-ui-custom"></a>
+#### 自定义终端组件
+
+- 当前接口叶子：`custom`（Pi component 的 `render(width)`、`handleInput(raw)`、
+  `requestRender`、`dispose`、`done(value)`）。
+- 理论对应：[DSH / 客户端与 Web](#dsh-client)。
+- 当前公开 seam：dsh-TUI `tuiScenes`、dsh-pi-tui `piTuiExtensions` 的
+  `UNSTABLE_API_LEVEL=1` / `unstable.surface.handle.mountComponent`。
+- **web 一律不承接（2026-08-29 用户拍板，"web 零 TUI 投影"）**：浏览器只渲染
+  产品 UI，`ui.custom` 在 web 与 headless 同走 Pi 官方 rpc 降级（resolve
+  undefined），`mode` 在 web 报 'rpc'。旧的 web scene 座位（终端帧投 modal）
+  已整体删除；scene 会承载的内容由产品面接（side conversation→侧聊浮窗、
+  MCP 管理→MCP 标签页），逐个核对无缺席消费者。
+- 当前投影（终端席）：Pi component 留在 Host。中间 relay 只交换可序列化的
+  `width / lines / input / close`；当前 dsh-pi-tui Direct 模式用
+  本地 transport 包装该 relay，未来 Server/Client 分离只需替换 transport，不能把
+  callback 或 component object 跨边界。表面选择按公开 service/capability，不按消费插件名。
+- 理论判断：宿主语义翻译；raw input/focus/surface lifecycle 受 dsh-pi-tui Unstable 层级
+  约束，必须按 capability/API level 探测并在缺失时降级。
+
+<a id="pi-ui-notifications"></a>
+#### 通知与工作状态
+
+- 当前接口叶子：`notify`、`setStatus`、`setWidget`、`setWorkingMessage`、
+  `setWorkingVisible`、`setWorkingIndicator`、`setHiddenThinkingLabel`。
+- 理论对应：[DSH / 客户端与 Web](#dsh-client)。
+- 需要的公开 seam：client module 与 shell slots。
+- 理论判断：组合承接。
+
+<a id="pi-ui-chrome"></a>
+#### 宿主框架与工具展开状态
+
+- 当前接口叶子：`setFooter`、`setHeader`、`setTitle`、`getToolsExpanded`、
+  `setToolsExpanded`。
+- 理论对应：[DSH / 客户端与 Web](#dsh-client)。
+- 需要的公开 seam：client slot registry 与宿主持有的呈现状态。
+- 理论判断：组合承接。
+
+<a id="pi-ui-editor"></a>
+#### 编辑器交互
+
+- 当前接口叶子：`onTerminalInput`、`pasteToEditor`、`setEditorText`、`getEditorText`、
+  `addAutocompleteProvider`、`setEditorComponent`、`getEditorComponent`。
+- 理论对应：[DSH / 客户端与 Web](#dsh-client)与
+  [DSH / 命令与人机交互](#dsh-interaction)。
+- 需要的公开 seam：client editor slots 与 command/input bridge。
+- 理论判断：宿主语义翻译。
+
+<a id="pi-ui-rendering"></a>
+#### 消息渲染与主题
+
+- 当前接口叶子：`registerMessageRenderer`、`registerEntryRenderer`、
+  `registerMarkdownTransformer`、`hasUI`、`theme`、`getAllThemes`、`getTheme`、`setTheme`。
+- 理论对应：[DSH / 客户端与 Web](#dsh-client)。
+- 需要的公开 seam：Web-native client modules 与 slots。
+- 理论判断：宿主语义翻译；便携呈现意图与 Pi 终端组件仍需继续拆分。
+
+### 项目环境与资源
+
+<a id="pi-project-trust"></a>
+#### 项目信任
+
+- 当前接口叶子：`isProjectTrusted`、`project_trust`。
+- 理论对应：[DSH / 插件组合](#dsh-composition)与
+  [DSH / 工作区资源](#dsh-resources)。
+- 理论需要：早于项目资源加载的宿主持有 trust policy。
+- 当前公开 seam：普通仓外插件挂载得太晚。
+- 理论判断：缺公开 seam。
+
+<a id="pi-resources-discovery"></a>
+#### 动态资源发现
+
+- 当前接口叶子：`resources_discover`。
+- 理论对应：[DSH / 工作区资源](#dsh-resources)与
+  [DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：具有生命周期的 skill/MCP/resource providers。
+- 理论判断：组合承接。当前仓库实现已把目录形式的 `skillPaths` 注册为官方 filesystem
+  provider；pi-hermes-memory 的全局/项目 skill 创建后跨进程发现和原生 `skill` 工具加载
+  已在 `52f7841` 本地构建上通过。npm `pi2dsh@0.24.0` 尚未包含此实现，不能混用结论。
+
+<a id="pi-events-bus"></a>
+#### 包内事件总线
+
+- 当前接口叶子：`events`。
+- 理论对应：[DSH / 插件组合](#dsh-composition)。
+- 需要的公开 seam：随插件 fiber 销毁的 package-scoped event bus。
+- 理论判断：直接承接。
+
+### DSH 0.1.5 的同契约承载（2026-09-10）
+
+仍对齐 Pi 0.84.1 的既有契约，不引入 Pi V2，也不新造架构分类。
+
+| 既有能力分支 | 0.1.5 的承载机制与公开 seam | 翻译与权威边界 |
+|---|---|---|
+| 模型调用、逐轮系统提示词 | LLM 消息序列中的 system message；一次性调用仍可用 GenerateOptions.system | Pi transport 只得到单个 systemPrompt；桥不声明其未实现的 in-history 能力，由 DSH 决定兼容的系统头表示 |
+| 会话读取与上下文 | Session.snapshotEvents / eventAt / seq | 读原生事件日志，不缓存另一份会话；旧宿主保留 events 数组/方法路径 |
+| 消息流 | agent/assistant-stream 的 start/chunk/end；完成态在原生日志 | 按 Agent/attempt 区分增量，重试重置，丢弃重复/过期片段；旧宿主继续消费 assistant/chunk。流式内容仍是已有的部分 Pi 消息投影 |
+| 子代理创建与生命周期 | setup(agentCtx, agent)、create/resume 的 parentAgent | 创建中的 Agent 显式传递；元数据 parentSession 与实时所有权分别保留，工具和委托策略进入子作用域 |
+| Agent 队列 | agent.inbox.nextStep / nextTurn | 从公开队列判断 pending；claim 留在驱动器，不复制队列 |
+| 文件上下文 | attachments.fileHostPath、fs.processPathFromHostPath、llm.fileHandleText | Pi 侧看宿主生成的文件定位文本；未改写的定位文本回译成原文件引用，保留 DSH 的存储、展示和访问判断 |
+| 工具图片呈现 | tool.call.toolview 的 owner 提供 loadImage | 使用宿主授权加载器取得图片，不释放宿主持有的 URL；旧宿主保留 session.attachment 路径。附件存储与访问控制继续由 DSH 持有 |
+
+浏览器产品通过既有 `browserPresentation` 配置声明自行承载呈现时，`ui.custom`
+沿用 Pi RPC 的 `undefined` 返回，避免把已有产品面完成的操作误报为终端组件错误。
+仅有原生问答、没有声明产品呈现的 Web 组合仍抛出可捕获的能力错误，供原包执行其
+非终端 fallback。侧聊投影遵守 Pi 消息的 `display: false`，隐藏宿主上下文而不删改
+模型输入或原生日志；显式可见的自定义消息仍保留。
+
+版本分支由公开能力与回调参数识别，不依赖包名特判或 DSH 内部对象。
+用户已明确排除跨版本旧数据迁移；本轮验证新建数据及同版本重启，不实现旧 seq 引用重映射。
+
+### 当前尚未归类 / 待继续审计
+
+- `sessionManager`、`modelRegistry` 等嵌套对象尚需继续拆 callable；
+- 动态注册、不同 Pi 版本及插件私下依赖的运行时约定继续按真实消费者补充；
+- 新发现的能力如果不能合理放入上述分支，先调整树，不强塞进旧分类。
+
+## DSH 的工作机制，用人话说
+
+DSH 像一块运行中还能换件的 Agent 主板：profile 是装机单，service definition 是插座，
+provider 是可以替换的零件，agent 是发动机，session log 是飞行记录仪，waterfall 是决定
+真正落地前的检查站，client module/slot 是浏览器半边；Cordis fiber/effect 负责依赖、
+启停和拆卸清理。
+
+它的核心目的不是把所有能力写死在 Agent 里，而是让模型、工具、存储、执行器、资源、
+交互和客户端都能按公开 seam 组合；已经发生的事实进入持久日志，尚未决定的策略通过
+provider 或 waterfall 参与。DSH 官方引用的 Cordis 论文
+[_A Programming Paradigm for Spatiotemporal Composability_](https://github.com/cordiverse/paper)
+解释运行时替换、清理、重绑和回滚；相关的 harness 研究索引
+[_Agent Systems with Harness Engineering_](https://github.com/RUCAIBox/awesome-agent-harness)
+解释模型之外为什么还需要循环、工具、记忆、workspace、skills、多 Agent、安全和评估。
+
+## DSH 承载机制树
+
+<a id="dsh-composition"></a>
+### 插件组合与策略
+
+- 当前模块叶子：`core`、`extensions`、`settings`、`scope`、`invariants`、
+  `permission-presets`。
+- 当前公开 seam：Cordis service/provider、`ctx.effect`、`ctx.inject`、waterfall、
+  scope/isolate/intercept。
+- 负责：插件依赖、启停清理、策略组合、配置与权限。引擎拥有的 host 级 service
+  不能以“发现到社区插件”为生存条件：零个 Pi 包时也要挂 provider 目录、`/login`、
+  凭证恢复等宿主能力；发现清单只决定包级 extension 是否挂载。
+
+<a id="dsh-session"></a>
+### 会话与持久化
+
+- 当前模块叶子：`compaction`、`persistence`、`session-projection`、`session-query`、
+  `session-reference`、`session-telemetry`、`session-title`、`session`、`spill`、`storage`。
+- 当前公开 seam：`ctx.sessions`、`Session.append`、durable session events、compaction、
+  session projection；rc.8 的 LLM 完成包可携带 `ReplayEnvelope`，被取消的部分 assistant
+  输出可用 `assistant/message.interrupted` 留作持久事实。
+- 负责：权威会话事实、恢复、分支、压缩、查询和展示投影。物理存储格式不是逻辑事件
+  ABI：选择 SQLite persistence 时 rc.8 schema 17 与旧库不兼容，属于 provider 迁移边界，
+  不改变默认 session log 的理论映射。
+
+<a id="dsh-model-runtime"></a>
+### 模型运行时
+
+- 当前模块叶子：`credentials`、`llm-streaming`、`token-meter`、`system-prompt`。
+- 当前公开 seam：`llm.registerAdapter`、`llm/stream`、credentials provider、
+  `system-prompt/assemble`、`agent/request`；rc.8 的官方 `llm-pi-ai` profile 可声明模型
+  输入模态、推理档位，以及按协议开放的 provider compat。
+- 负责：模型目录、路由、凭证、调用、token 与提示词装配。配置型 Pi provider 应翻译
+  到官方 profile；只有插件自带 transport 时才注册 adapter。catalog 厂商专属 compat
+  仍由其已安装目录掌管，不能当通用网关开关透传。
+
+<a id="dsh-execution"></a>
+### 工具、执行与隔离
+
+- 当前模块叶子：`approval`、`code-runtime`、`filesystem`、`sandbox`、`shell`、
+  `subprocess`、`terminal`、`tools`。
+- 当前公开 seam：`ctx.tools`、`ctx.exec`、subprocess provider、sandbox provider、
+  approval policy。
+- 负责：工具目录、执行、权限与隔离；插件直接调用 Node 不自动继承这些能力。
+
+<a id="dsh-resources"></a>
+### 工作区资源
+
+- 当前模块叶子：`attachment`、`skills`、`web`、`workspace`、`lsp`。
+- 当前公开 seam：attachment/skill/web/workspace/LSP providers。
+- 负责：项目输入、技能、联网资源、工作区与语言服务。
+
+<a id="dsh-orchestration"></a>
+### Agent 编排
+
+- 当前模块叶子：`goal`、`jobs`、`plan`、`schedule`、`subagent`、`workflow`。
+- 当前公开 seam：`ctx.agents`、subagent provider、goal/plan/jobs/workflow providers。
+- 负责：Agent 创建、任务分解、计划、后台工作与工作流。
+
+<a id="dsh-interaction"></a>
+### 命令与人机交互
+
+- 当前模块叶子：`commands`、`feedback`、`user-questions`。
+- 当前公开 seam：`ctx.commands`、`ctx.userQuestions`、feedback provider。rc.8 的命令
+  执行 ABI 是 `execute(agent, line, images, signal)`；命令可以声明接收图片，handler 从
+  attachments 读取，而不是把取消信号错当图片数组。
+- 负责：文本/图片命令入口、阻塞提问和用户反馈。
+
+<a id="dsh-client"></a>
+### 客户端、Web 与终端表面
+
+- 当前模块叶子：`client-modules`、`typert`、`web-server`。
+- 当前公开 seam：client module、slot registry、web route、typert remote surface、
+  dsh-TUI `tuiScenes`/`tuiStatus`，以及 dsh-pi-tui 的版本化 `piTuiExtensions` surface；
+  0.1.2 线新增 `settings.models.provider-card`（keyed）与 `settings.models.footer`
+  （list）两个 Models 页扩展座位（见「Provider OAuth 登录面」的 alpha 分支）。
+- 跨代注册姿势：`slots.inject('<座位名>', () => slots.register(...))` 是官方推荐
+  形状，座位名在该代宿主上从未被声明时回调永不触发——旧代优雅缺席天然成立，
+  不需要版本探针（直接裸 `register` 未声明座位会 throw，别用）。
+- **"台上是谁"不能只信 `current`（2026-08-29）**：0.1.2 线的 New Session 草稿
+  视图把主栏换成空态但不改 `current`（rc 线会清），按 `current` 键显示的
+  frame 级浮动件会跨会话残留。诚实信号=会话作用域 conversation 座位的挂载
+  寿命：中间层在 `conversation.session.header.utilities` 放一枚不可见 stage
+  beacon，浮动件只在"current 且其对话真挂在主栏"时显示（`useOnStage`）。
+  该草稿行为与宿主 session store 自己的注释（"the window opens ⟺ the session
+  is on stage"）矛盾，列上游候选报告。
+- 负责：浏览器/终端呈现、插件客户端代码和宿主界面扩展。展示层不得另建模型、工具或
+  session 权威；未来 Server/Client 模式以 data/identity/method/event relay 相连，不传 callback。
+  `dsh.client.inject` 声明的是客户
+  端**包依赖**，客户端源码导出的 `inject` 才声明 `slots` 等 Cordis 运行时 service；
+  `dsh.client.external` 只用于动态模块图中的外部包，不能拿 service 名来填。
+
+### DSH 0.1.5 的同契约承载（2026-09-10）
+
+仍对齐 Pi 0.84.1 的既有契约，不引入 Pi V2，也不新造架构分类。
+
+| 既有能力分支 | 0.1.5 的承载机制与公开 seam | 翻译与权威边界 |
+|---|---|---|
+| 模型调用、逐轮系统提示词 | LLM 消息序列中的 system message；一次性调用仍可用 GenerateOptions.system | Pi transport 只得到单个 systemPrompt；桥不声明其未实现的 in-history 能力，由 DSH 决定兼容的系统头表示 |
+| 会话读取与上下文 | Session.snapshotEvents / eventAt / seq | 读原生事件日志，不缓存另一份会话；旧宿主保留 events 数组/方法路径 |
+| 消息流 | agent/assistant-stream 的 start/chunk/end；完成态在原生日志 | 按 Agent/attempt 区分增量，重试重置，丢弃重复/过期片段；旧宿主继续消费 assistant/chunk。流式内容仍是已有的部分 Pi 消息投影 |
+| 子代理创建与生命周期 | setup(agentCtx, agent)、create/resume 的 parentAgent | 创建中的 Agent 显式传递；元数据 parentSession 与实时所有权分别保留，工具和委托策略进入子作用域 |
+| Agent 队列 | agent.inbox.nextStep / nextTurn | 从公开队列判断 pending；claim 留在驱动器，不复制队列 |
+| 文件上下文 | attachments.fileHostPath、fs.processPathFromHostPath、llm.fileHandleText | Pi 侧看宿主生成的文件定位文本；未改写的定位文本回译成原文件引用，保留 DSH 的存储、展示和访问判断 |
+
+版本分支由公开能力与回调参数识别，不依赖包名特判或 DSH 内部对象。
+用户已明确排除跨版本旧数据迁移；本轮验证新建数据及同版本重启，不实现旧 seq 引用重映射。
+
+### 当前尚未归类 / 待继续审计
+
+- 后续 DSH 版本加入的 subsystem、service、waterfall、event 和 client slot；
+- Cordis 卸载、provider replacement、隔离、重绑和失败回滚等生命周期语义；
+- 只在源码中出现但尚未证明能被仓外插件调用的入口。
+
+## 怎样继续维护
+
+新增接口或模块时，直接挂到最合适的稳定标题下面；若语义放不进去，调整知识树并说明
+原因。理论模型只说“应该由谁承载、需要什么公开 seam”，不在这里声称真实插件已经
+跑通；实践证据统一进入 [`plugin-validation-matrix.md`](plugin-validation-matrix.md)。

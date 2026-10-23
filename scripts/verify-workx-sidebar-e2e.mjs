@@ -1,0 +1,136 @@
+#!/usr/bin/env node
+// The sidebar half of the suite's Memory/Tasks surfaces: with the community
+// dsh-better-sidebar installed, the suite's Memory and Tasks tabs must appear
+// in the per-session right sidebar and carry the same live data as their
+// stock seats. Per the 2026-08-30 visual standard, each tab is opened,
+// asserted against store-only content, and screenshotted for human eyes.
+//
+// Usage: DEEPSEEK_API_KEY=… node scripts/verify-workx-sidebar-e2e.mjs [out.json]
+import assert from 'node:assert/strict'
+import { execFile as execFileCallback, spawn } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { readdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
+import { createE2eHarness } from './lib/e2e-harness.mjs'
+import { stageSuiteTarball } from './lib/suite-tarball.mjs'
+
+const execFile = promisify(execFileCallback)
+const projectRoot = resolve(new URL('..', import.meta.url).pathname)
+const dshRoot = process.env.PI2DSH_DSH_ROOT === undefined
+  ? resolve(projectRoot, '..', 'deepseek-harness')
+  : resolve(process.env.PI2DSH_DSH_ROOT)
+const directDshBin = process.env.PI2DSH_DSH_BIN === undefined ? undefined : resolve(process.env.PI2DSH_DSH_BIN)
+const dshBin = directDshBin ?? join(dshRoot, 'apps/cli/src/bin.ts')
+const dshCwd = resolve(process.env.PI2DSH_DSH_CWD ?? dshRoot)
+const { makeHome, useJsonlSessions } = createE2eHarness({ dshRoot, directDshBin, dshBin, dshCwd })
+
+const apiKey = process.env.DEEPSEEK_API_KEY
+assert(apiKey, 'DEEPSEEK_API_KEY is required')
+const engineSpec = process.env.PI2DSH_ENGINE_SPEC ?? `file:${projectRoot}`
+const outputPath = resolve(process.argv[2] ?? 'community/workx-sidebar-e2e.json')
+const playwrightFrom = process.env.PLAYWRIGHT_FROM ?? join(dshRoot, 'apps/web')
+
+const scratch = await mkdtemp(join(tmpdir(), 'pi2dsh-workx-sb-'))
+let web
+try {
+  const { home, env, runDsh } = await makeHome(scratch)
+  const tarball = await stageSuiteTarball(projectRoot, engineSpec, scratch, env)
+  await runDsh(['plugin', '--profile', 'web', 'add', tarball])
+  // The community sidebar ships per-generation: latest (0.17.1) imports
+  // settingsNamespace, which the alpha line removed from dsh-settings — on an
+  // alpha CLI it is a boot-crashing SyntaxError, not a degraded mount. Its
+  // npm `alpha` tag (0.18.0-alpha.0, peers ^0.1.2-alpha.2) is the pair for
+  // alpha CLIs; pass PI2DSH_SIDEBAR_SPEC=dsh-better-sidebar@alpha there.
+  await runDsh(['plugin', '--profile', 'web', 'add', process.env.PI2DSH_SIDEBAR_SPEC ?? 'dsh-better-sidebar'])
+  await useJsonlSessions(home, 'web')
+  const workspace = join(scratch, 'workspace')
+  await mkdir(workspace, { recursive: true })
+
+  const port = Number(process.env.WORKX_SB_PORT ?? 5197)
+  // A zombie web server from an earlier run answers the 401 probe with ITS
+  // gate while the fresh spawn dies on EADDRINUSE — the token then never
+  // appears and the wait times out blaming the wrong process. Fail loud
+  // BEFORE spawning instead.
+  const portFree = await fetch(`http://127.0.0.1:${port}`).then(() => false).catch(() => true)
+  if (!portFree) throw new Error(`port ${port} is already serving — kill the leftover dsh web first (lsof -ti :${port} | xargs kill)`)
+  web = spawn(
+    directDshBin === undefined ? 'node' : directDshBin,
+    directDshBin === undefined
+      ? ['--import', 'tsx/esm', dshBin, '--profile', 'web', '--port', String(port)]
+      : ['--profile', 'web', '--port', String(port)],
+    { cwd: dshCwd, env, stdio: ['ignore', 'pipe', 'pipe'] },
+  )
+  let webLog = ''
+  web.stdout.on('data', chunk => { webLog += String(chunk) })
+  web.stderr.on('data', chunk => { webLog += String(chunk) })
+  const url = `http://127.0.0.1:${port}`
+  const deadline = Date.now() + 90_000
+  for (;;) {
+    if (web.exitCode !== null) throw new Error(`dsh web exited on startup:\n${webLog}`)
+    const up = await fetch(url).then(r => r.ok || r.status === 401).catch(() => false)
+    if (up) break
+    if (Date.now() > deadline) throw new Error(`dsh web never came up:\n${webLog}`)
+    await new Promise(done => setTimeout(done, 500))
+  }
+  // Same discipline as the examples harness's authedUrl: the 401 gate
+  // answers readiness BEFORE the token line reaches the log, and a capture
+  // launched in that gap opens the bare origin and stalls on the auth wall.
+  // When the server is gated the token MUST appear; its absence fails loud.
+  const gated = await fetch(url).then(response => response.status === 401).catch(() => false)
+  const tokenDeadline = Date.now() + (gated ? 90_000 : 0)
+  let authed = url
+  for (;;) {
+    const token = /[?&]token=([A-Za-z0-9_-]+)/u.exec(webLog)
+    if (token !== null) { authed = `${url}/?token=${token[1]}`; break }
+    // The HTTP listener answers 401 BEFORE the plugin tree loads — a plugin
+    // that crashes boot (e.g. a sidebar built for the other DSH generation)
+    // leaves a dead process behind a live-looking gate, and a wait that only
+    // watches the log misreports it as "no token printed". Watch the process.
+    if (web.exitCode !== null) throw new Error(`dsh web died after opening its port:\n${webLog.slice(-4000)}`)
+    if (Date.now() > tokenDeadline) {
+      if (gated) throw new Error(`dsh web answers 401 (launch-token gate) but printed no ?token= url in its log:\n${webLog.slice(-4000)}`)
+      break
+    }
+    await new Promise(done => setTimeout(done, 500))
+  }
+
+  const CODEWORD = `BOREAL-${Math.floor(1000 + Math.random() * 9000)}`
+  const shots = join(scratch, 'shots')
+  await execFile('node', [
+    join(projectRoot, 'docs/posting-kit/capture-workx-sidebar.mjs'), shots,
+    '--url', authed, '--codeword', CODEWORD,
+  ], {
+    cwd: projectRoot,
+    env: { ...env, PLAYWRIGHT_FROM: playwrightFrom, CAPTURE_WORKSPACE: workspace },
+    timeout: 420_000,
+    maxBuffer: 16 * 1024 * 1024,
+  }).catch(error => { console.log(String(error.stdout ?? ''), String(error.stderr ?? '')); throw error })
+
+  const taken = (await readdir(shots)).sort()
+  for (const required of ['01-sidebar-memory.png', '02-sidebar-tasks.png']) {
+    assert(taken.includes(required), `missing ${required} — got ${JSON.stringify(taken)}`)
+  }
+  await writeFile(outputPath, JSON.stringify({ results: { workXSidebar: { status: 'passed', screenshots: taken } } }, null, 2))
+  console.log(`[workx-sidebar] passed — shots kept at ${shots}`)
+  console.log(`[workx-sidebar] evidence → ${outputPath}`)
+} finally {
+  web?.kill('SIGTERM')
+  if (process.env.PI2DSH_KEEP_SCRATCH === '1') console.error(`kept scratch: ${scratch}`)
+  else {
+    // Tolerate stragglers: profile children keep writing into the home for a
+    // beat after the server dies, and a concurrent write turns rm into
+    // ENOTEMPTY — which crashed a PASSED run after its evidence was written
+    // (2026-08-31). Same discipline as the examples harness's removeScratch.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await rm(scratch, { recursive: true, force: true })
+        break
+      } catch (error) {
+        if (attempt === 3) console.error(`[workx-sidebar] scratch cleanup left ${scratch}: ${String(error)}`)
+        else await new Promise(done => setTimeout(done, 700))
+      }
+    }
+  }
+}

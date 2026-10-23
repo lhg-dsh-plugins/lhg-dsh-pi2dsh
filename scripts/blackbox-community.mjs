@@ -1,0 +1,567 @@
+#!/usr/bin/env node
+// Black-box verification for the community corpus: install every non-fatal
+// package and MOUNT it inside a real DSH runtime composition, exactly as the
+// engine does for a reader (`dsh plugin add <pkg>`). Static analysis
+// screens; this run certifies. Output per package:
+//   - loaded:      the bundle mounted; registration surface recorded
+//   - load-failed: the error message is a concrete ABI gap to fix
+//   - fatal:       conversion refused (supply-chain/closure findings)
+// Usage: node scripts/blackbox-community.mjs [output.json] [--only name,name] [--exercise]
+//   --exercise: after mounting, EXECUTE representative tools/commands with
+//   schema-derived minimal arguments against local fixture services. Grades:
+//     working                  — a real invocation returned success
+//     executed-input-validation — business logic ran end-to-end and rejected
+//                                the synthetic probe arguments
+//     callable-needs-config    — the call executed but wants credentials/config
+//     timed-out                — still executing when the 20s probe abort hit
+//     nothing-exercisable      — no safely probeable callable surface (e.g.
+//                                pure event-hook packages)
+//     failed                   — invocation errored for another reason
+//   The bridge's own host-native surface (measured by mounting a
+//   zero-contribution fixture extension) is subtracted from every probe.
+//   Mutating/destructive tool names are skipped (word-level match) except
+//   exec, which runs a harmless echo through the real subprocess seam.
+//   Optional env: DEEPSEEK_API_KEY (real-credential probes),
+//   PI2DSH_BLACKBOX_PI_BIN (a real `pi` binary for child-pi dispatch;
+//   wrapped with --provider deepseek so dispatched children answer live),
+//   PI2DSH_BLACKBOX_PI_ARGS (override that default provider/model).
+import { execFile as execFileCallback } from 'node:child_process'
+import { createServer } from 'node:http'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
+import { Context } from '@deepseek-ai/cordis'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import LocalAttachmentStore from '@deepseek-ai/dsh-attachment-local'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
+import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import UserQuestionService from '@deepseek-ai/dsh-user-questions'
+import { analyzePackage, applyPiHost, resolvePiPackage } from '../dist/index.mjs'
+
+const execFile = promisify(execFileCallback)
+const projectRoot = resolve(new URL('..', import.meta.url).pathname)
+const positional = process.argv.slice(2).filter(arg => !arg.startsWith('--'))
+const outputPath = resolve(positional[0] ?? 'community/blackbox-results.json')
+const onlyArg = process.argv.find(arg => arg.startsWith('--only'))
+const only = onlyArg === undefined ? undefined : new Set((onlyArg.split('=')[1] ?? '').split(',').filter(Boolean))
+
+const exercise = process.argv.includes('--exercise')
+
+const corpus = JSON.parse(await readFile(join(projectRoot, 'community/corpus.json'), 'utf8'))
+const scratch = await mkdtemp(join(tmpdir(), 'pi2dsh-blackbox-'))
+const workspace = join(scratch, 'workspace')
+await mkdir(workspace, { recursive: true })
+await writeFile(join(workspace, 'sample.txt'), 'pi2dsh exercise probe file\nline two\n')
+await writeFile(join(workspace, 'sample.ts'), 'export const probe = 1\n')
+
+// Local fixture endpoints so network-shaped tools can really succeed without
+// external services. SearXNG-compatible search + a plain HTML page + an
+// OpenAI-images-compatible endpoint.
+const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nX8AAAAASUVORK5CYII='
+const fixtureServer = createServer((request, response) => {
+  if (request.url?.startsWith('/search')) {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ results: [{ title: 'pi2dsh exercise result', url: 'http://127.0.0.1/result', content: 'PI2DSH_EXERCISE_OK' }] }))
+    return
+  }
+  if (request.url === '/v1/images/generations' && request.method === 'POST') {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ data: [{ b64_json: tinyPng, revised_prompt: 'PI2DSH_EXERCISE_OK' }] }))
+    return
+  }
+  // LiteLLM-gateway-shaped skills API (pi-provider-litellm manages skills
+  // through GET/POST {LITELLM_BASE_URL}/v1/skills).
+  if (request.url?.startsWith('/v1/skills')) {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({
+      skills: [{ name: 'pi2dsh-fixture-skill', description: 'PI2DSH_EXERCISE_OK', instructions: 'PI2DSH_EXERCISE_OK' }],
+      data: [{ name: 'pi2dsh-fixture-skill', description: 'PI2DSH_EXERCISE_OK' }],
+    }))
+    return
+  }
+  response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+  response.end('<html><head><title>pi2dsh exercise page</title></head><body><h1>PI2DSH_EXERCISE_OK</h1></body></html>')
+})
+await new Promise((resolveListen, reject) => {
+  fixtureServer.once('error', reject)
+  fixtureServer.listen(0, '127.0.0.1', resolveListen)
+})
+const fixtureBase = `http://127.0.0.1:${fixtureServer.address().port}`
+process.env.WEB_SEARCH_PROVIDER = 'searxng'
+
+// Ollama-shaped fixture on the port @ollama/pi-web-search hard-codes; skipped
+// when a real Ollama (or anything else) already owns the port.
+const ollamaFixture = createServer((request, response) => {
+  if (request.url === '/api/experimental/web_search' && request.method === 'POST') {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ results: [{ title: 'pi2dsh exercise result', url: `${fixtureBase}/page`, content: 'PI2DSH_EXERCISE_OK' }] }))
+    return
+  }
+  if (request.url === '/api/experimental/web_fetch' && request.method === 'POST') {
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ title: 'pi2dsh exercise page', content: 'PI2DSH_EXERCISE_OK', links: [] }))
+    return
+  }
+  response.writeHead(404, { 'content-type': 'application/json' })
+  response.end('{}')
+})
+await new Promise(resolveListen => {
+  ollamaFixture.once('error', () => {
+    console.warn('[pi2dsh] port 11434 already in use — @ollama/pi-web-search will talk to whatever owns it')
+    resolveListen()
+  })
+  ollamaFixture.listen(11434, '127.0.0.1', resolveListen)
+})
+
+// Pi settings image-model packages read: pi-image-gen resolves its default
+// model through an OpenAI-compatible custom provider pointed at the fixture's
+// images endpoint. Pi's shared settings loader resolves the CONFIG dir as
+// PI_CODING_AGENT_DIR > PI_AGENT_HOME > ~/.pi/agent, so write the same
+// settings.json into both isolated dirs.
+const agentHome = join(scratch, 'pi-agent-home')
+await mkdir(agentHome, { recursive: true })
+process.env.PI_AGENT_HOME = agentHome
+process.env.SEARXNG_URL = fixtureBase
+
+// Pi state (settings, sidecars) stays inside the scratch dir.
+process.env.PI_CODING_AGENT_DIR = join(scratch, 'pi-agent')
+await mkdir(process.env.PI_CODING_AGENT_DIR, { recursive: true })
+const piSettings = JSON.stringify({
+  'pi-image-gen': {
+    defaultModel: 'pi2dsh-probe',
+    customProviders: {
+      fixture: {
+        api: 'openai',
+        baseUrl: `${fixtureBase}/v1`,
+        apiKey: 'pi2dsh-fixture-key',
+        models: [{ id: 'pi2dsh-probe' }],
+      },
+    },
+  },
+}, null, 2)
+// pi-provider-litellm's skill tools talk to a LiteLLM gateway; point them at
+// the fixture's /v1/skills endpoint.
+process.env.LITELLM_BASE_URL = fixtureBase
+process.env.LITELLM_API_KEY = 'pi2dsh-fixture-key'
+await writeFile(join(agentHome, 'settings.json'), piSettings)
+await writeFile(join(process.env.PI_CODING_AGENT_DIR, 'settings.json'), piSettings)
+
+// A real (minimal) MCP stdio server plus a .pi/mcp.json pointing at it, so
+// MCP client packages register their command/tool surface and can exercise a
+// genuine end-to-end tool bridge. The probe process itself runs chdir'd into
+// the workspace: Pi extensions resolve project config from process.cwd() at
+// load time, exactly like a user launching the host inside their project.
+await writeFile(join(workspace, 'mcp-fixture-server.mjs'), `#!/usr/bin/env node
+import { createInterface } from 'node:readline'
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n')
+createInterface({ input: process.stdin }).on('line', line => {
+  let message
+  try { message = JSON.parse(line) } catch { return }
+  if (message.id === undefined) return
+  if (message.method === 'initialize') {
+    reply(message.id, {
+      protocolVersion: message.params?.protocolVersion ?? '2024-11-05',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'pi2dsh-fixture', version: '0.0.0' },
+    })
+  } else if (message.method === 'tools/list') {
+    reply(message.id, { tools: [{
+      name: 'fixture_echo',
+      description: 'Echo back the given text (pi2dsh black-box fixture).',
+      inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'text to echo' } }, required: ['text'] },
+    }] })
+  } else if (message.method === 'tools/call') {
+    reply(message.id, { content: [{ type: 'text', text: 'PI2DSH_EXERCISE_OK ' + String(message.params?.arguments?.text ?? '') }], isError: false })
+  } else {
+    reply(message.id, {})
+  }
+})
+`)
+await mkdir(join(workspace, '.pi'), { recursive: true })
+await writeFile(join(workspace, '.pi', 'mcp.json'), JSON.stringify({
+  mcpServers: {
+    'pi2dsh-fixture': {
+      command: process.execPath,
+      args: [join(workspace, 'mcp-fixture-server.mjs')],
+      lifecycle: 'eager',
+    },
+  },
+}, null, 2))
+process.chdir(workspace)
+
+// Real child-`pi` dispatch: packages like @mjasnikovs/pi-task spawn a `pi`
+// CLI process (PI_BIN is pi's own documented override seam). When the runner
+// provides a real pi binary (PI2DSH_BLACKBOX_PI_BIN) plus model credentials,
+// wrap it with a default provider/model so dispatched children answer with a
+// real model. Without both, such packages stay timed-out — honestly.
+if (process.env.PI2DSH_BLACKBOX_PI_BIN && process.env.DEEPSEEK_API_KEY) {
+  const piWrapper = join(scratch, 'pi-bin-wrapper.sh')
+  const piDefaultArgs = process.env.PI2DSH_BLACKBOX_PI_ARGS ?? '--provider deepseek --model deepseek-chat'
+  await writeFile(piWrapper, `#!/bin/sh\nexec ${JSON.stringify(process.env.PI2DSH_BLACKBOX_PI_BIN)} ${piDefaultArgs} "$@"\n`, { mode: 0o755 })
+  process.env.PI_BIN = piWrapper
+  console.error(`[pi2dsh] child pi dispatch armed: PI_BIN wraps ${process.env.PI2DSH_BLACKBOX_PI_BIN} (${piDefaultArgs})`)
+}
+
+const delay = ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms))
+
+function classifyGap(message) {
+  if (/Cannot find module|ERR_MODULE_NOT_FOUND|Cannot find package/iu.test(message)) return 'missing-runtime-module'
+  if (/is not a function|is not a constructor|undefined is not/iu.test(message)) return 'missing-abi-export-or-shape'
+  if (/requires a native DSH port|native DSH mapping|DSH-native/iu.test(message)) return 'explicit-degradation-hit-at-load'
+  if (/factory function/iu.test(message)) return 'entry-shape'
+  if (/parameters must use an object-root/iu.test(message)) return 'tool-schema-root'
+  if (/already registered/iu.test(message)) return 'duplicate-registration'
+  return 'other'
+}
+
+// ---- exercise support ------------------------------------------------------
+
+// Never invoke tools whose name suggests mutation of shared state. exec-like
+// tools DO run — through the real subprocess seam with a harmless echo.
+// Word-level matching, not substring: /kill/ must NOT match litellm_SKILL_list.
+const UNSAFE_WORDS = new Set(['kill', 'delete', 'remove', 'reset', 'clear', 'write', 'edit', 'patch', 'steer', 'publish', 'deploy', 'install', 'upload'])
+const nameWords = name => String(name).replace(/([a-z0-9])([A-Z])/gu, '$1_$2').toLowerCase().split(/[^a-z0-9]+/u)
+const isUnsafeName = name => nameWords(name).some(word => UNSAFE_WORDS.has(word))
+const EXECISH_TOOL = /^(exec|exec_command|bash|shell|run_command)$/iu
+const CONFIG_ERROR = /api.?key|token|credential|auth|login|unauthorized|forbidden|403|401|not configured|missing.*(key|config|env)|no provider|env(ironment)? variable|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|fetch failed|network (error|failure|request failed)|Set .*_KEY|configure/iu
+
+function valueForString(name) {
+  const key = name.toLowerCase()
+  if (/url|link|endpoint/u.test(key)) return `${fixtureBase}/page`
+  if (/query|search|prompt|question|text|message|content|instruction|description/u.test(key)) return 'pi2dsh exercise probe'
+  if (/dir|cwd|root|workspace/u.test(key)) return workspace
+  if (/path|file/u.test(key)) return join(workspace, 'sample.txt')
+  if (/command|cmd/u.test(key)) return 'echo'
+  if (/name|title|label|id\b|identifier/u.test(key)) return 'pi2dsh-probe'
+  if (/lang|language/u.test(key)) return 'typescript'
+  return 'pi2dsh'
+}
+
+function minimalArguments(schema, toolName) {
+  if (typeof schema !== 'object' || schema === null) return {}
+  const output = {}
+  const properties = schema.properties ?? {}
+  const required = Array.isArray(schema.required) ? schema.required : []
+  for (const key of required) {
+    const spec = properties[key] ?? {}
+    if (Array.isArray(spec.enum) && spec.enum.length > 0) output[key] = spec.enum[0]
+    else if (spec.type === 'number' || spec.type === 'integer') output[key] = 1
+    else if (spec.type === 'boolean') output[key] = false
+    else if (spec.type === 'array') output[key] = spec.items?.type === 'string' ? [valueForString(key)] : []
+    else if (spec.type === 'object') output[key] = minimalArguments(spec, toolName)
+    else output[key] = valueForString(key)
+  }
+  if (EXECISH_TOOL.test(toolName)) {
+    if ('command' in properties) output.command = 'echo'
+    if ('args' in properties) output.args = ['pi2dsh-exercise']
+    if ('cmd' in properties) output.cmd = 'echo pi2dsh-exercise'
+  }
+  return output
+}
+
+// Package business logic rejecting the synthetic probe arguments proves the
+// execution path end-to-end; grade it as executed rather than failed.
+const INPUT_VALIDATION = /unknown .* (id|task)|does not know|no valid|provide exactly|no current model|not found|no such|invalid (argument|input|value)|must (be|match|specify)|required|missing (argument|parameter|field)|expected|(type|syntax) errors?[^]*not executed|cannot find name/iu
+
+function gradeOutcome(result) {
+  if (result.isError !== true) return 'working'
+  const text = (result.content ?? []).map(block => String(block.text ?? '')).join('\n')
+    + JSON.stringify(result.error ?? '')
+  if (CONFIG_ERROR.test(text)) return 'callable-needs-config'
+  return INPUT_VALIDATION.test(text) ? 'executed-input-validation' : 'failed'
+}
+
+async function exerciseSurface(ctx, agent, assembly, commands) {
+  const attempts = []
+  const candidates = assembly.tools
+    .filter(tool => !tool.name.startsWith('bb-'))
+    .filter(tool => EXECISH_TOOL.test(tool.name) || !isUnsafeName(tool.name))
+    .slice(0, 3)
+  for (const tool of candidates) {
+    const args = minimalArguments(tool.parameters ?? {}, tool.name)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('exercise timeout')), 20_000)
+    try {
+      const result = await ctx.tools.execute({
+        signal: controller.signal,
+        agent,
+        callId: CallId(`exercise-${tool.name}-${Date.now()}`),
+        name: tool.name,
+        arguments: args,
+      })
+      const text = (result.content ?? []).map(block => String(block.text ?? '')).join(' ').slice(0, 160)
+      // DSH wraps an aborted call into an isError result rather than
+      // rejecting; our own 20s probe abort still is not a package failure.
+      const timedOut = controller.signal.aborted
+      attempts.push({
+        kind: 'tool', name: tool.name, args,
+        outcome: timedOut ? 'timed-out' : gradeOutcome(result),
+        evidence: timedOut ? `still executing when the 20s probe timeout aborted it (${text.slice(0, 120)})` : text,
+      })
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      // Our own 20s probe abort is not a package failure: the tool was still
+      // executing (waiting on an external service the fixture environment
+      // cannot provide, e.g. a child `pi` process or model credentials).
+      const timedOut = controller.signal.aborted
+      attempts.push({
+        kind: 'tool', name: tool.name, args,
+        outcome: timedOut ? 'timed-out' : CONFIG_ERROR.test(message) ? 'callable-needs-config' : 'failed',
+        evidence: timedOut ? `still executing when the 20s probe timeout aborted it (${message.slice(0, 120)})` : message.slice(0, 160),
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  // Command-only packages: prove one harmless command handler actually runs.
+  if (attempts.length === 0 && commands.length > 0 && typeof ctx.commands?.execute === 'function') {
+    const name = commands.find(candidate => !isUnsafeName(candidate))
+    if (name !== undefined) {
+      try {
+        await ctx.commands.execute(agent, name, [], new AbortController().signal)
+        attempts.push({ kind: 'command', name, outcome: 'working', evidence: 'command handler completed' })
+      } catch (error) {
+        const message = String(error?.message ?? error)
+        attempts.push({
+          kind: 'command', name,
+          outcome: CONFIG_ERROR.test(message) ? 'callable-needs-config' : 'failed',
+          evidence: message.slice(0, 160),
+        })
+      }
+    }
+  }
+  const order = ['working', 'executed-input-validation', 'callable-needs-config', 'timed-out']
+  const grade = order.find(level => attempts.some(item => item.outcome === level))
+    ?? (attempts.length === 0 ? 'nothing-exercisable' : 'failed')
+  return { grade, attempts }
+}
+
+const emptyBaseline = { tools: new Set(), commands: new Set() }
+
+async function loadBundle(bundleDir, { baseline = emptyBaseline, probe = exercise } = {}) {
+  // The engine's own mount, over the package where it is installed — the same
+  // call `dsh plugin add pi2dsh` ends up making. Nothing is generated.
+  const generated = {
+    name: `pi2dsh:blackbox:${basename(bundleDir)}`,
+    inject: ['tools', 'systemPrompt', 'commands', 'skills'],
+    async apply(inner) {
+      await applyPiHost(inner, { packages: [{ name: basename(bundleDir), rootDir: bundleDir }] })
+    },
+  }
+  const ctx = new Context()
+  await ctx.plugin(SessionStore)
+  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false })
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(CommandRuntime)
+  await ctx.plugin(SkillRegistry)
+  await ctx.plugin(AgentRegistry)
+  await ctx.plugin(LocalAttachmentStore, { dshHome: join(scratch, 'dsh-home') })
+  await ctx.plugin(LocalSubprocessRuntime)
+  await ctx.plugin(UserQuestionService)
+  ctx.userQuestions.registerProvider({
+    async ask(request) {
+      return { answers: request.questions.map(question => ({ id: question.id, selected: [], custom: 'blackbox' })) }
+    },
+  })
+  ctx.systemPrompt.section({ name: 'blackbox:base', order: 0, text: 'Black-box base prompt.' })
+  const fiber = await ctx.plugin(generated)
+  const session = ctx.sessions.create(SessionId(`bb-${Date.now()}`), {
+    meta: { createdAt: Date.now(), cwd: workspace },
+  })
+  const agent = { id: session.id, session, steer() {}, inject() {}, followup() {}, whenIdle: () => Promise.resolve() }
+  // Register the probe agent with the real registry so services that verify
+  // live-agent identity (userQuestions) accept its calls.
+  let unregisterAgent
+  try {
+    unregisterAgent = ctx.agents?.register?.(agent)
+  } catch (error) {
+    console.warn(`[pi2dsh] probe agent registration skipped: ${String(error?.message ?? error).slice(0, 120)}`)
+  }
+  ctx.emit('agent/session-start', { agent, source: 'fresh' })
+  await delay(150)
+  let assembly = await ctx.systemPrompt.assemble()
+  // session_start handlers register tools asynchronously (key checks, model
+  // discovery, eager MCP server spawn + initialize handshake); take a second
+  // assembly after they settle so late registrations are exercised too.
+  await delay(800)
+  const second = await ctx.systemPrompt.assemble()
+  if (second.tools.length > assembly.tools.length) assembly = second
+  // Subtract the host-native surface (the bridge's own contribution, present
+  // on EVERY mount — e.g. the built-in OAuth /login command): a probe must
+  // measure the package's increment, not re-discover the bridge.
+  const tools = assembly.tools.map(tool => tool.name).filter(name => !baseline.tools.has(name))
+  let commands = []
+  try {
+    commands = (await ctx.commands?.list?.(agent) ?? [])
+      .map(command => command.name)
+      .filter(name => !baseline.commands.has(name))
+  } catch {
+    commands = []
+  }
+  let skills = []
+  try {
+    skills = (await ctx.skills.list({ cwd: workspace, signal: new AbortController().signal })).map(skill => skill.name)
+  } catch {
+    skills = []
+  }
+  let exercised
+  if (probe) {
+    try {
+      const packageAssembly = { ...assembly, tools: assembly.tools.filter(tool => !baseline.tools.has(tool.name)) }
+      exercised = await exerciseSurface(ctx, agent, packageAssembly, commands)
+    } catch (error) {
+      exercised = { grade: 'failed', attempts: [{ kind: 'harness', outcome: 'failed', evidence: String(error?.message ?? error).slice(0, 160) }] }
+    }
+  }
+  ctx.emit('agent/disposed', { agent })
+  await delay(30)
+  await fiber.dispose()
+  return { tools, commands, skills, exercised }
+}
+
+async function verifyOne(entry) {
+  const record = { rank: entry.rank, name: entry.name, downloadsPerMonth: entry.downloadsPerMonth }
+  let pkg
+  try {
+    pkg = await resolvePiPackage(entry.specifier ?? entry.name)
+  } catch (error) {
+    return { ...record, status: 'fatal', stage: 'resolve', error: String(error?.message ?? error) }
+  }
+  const bundleDir = join(scratch, 'packages', `${entry.rank}-${entry.name.replace(/[^a-zA-Z0-9._-]+/gu, '_')}`)
+  try {
+    let report
+    try {
+      await cp(pkg.rootDir, bundleDir, { recursive: true })
+      report = await analyzePackage(pkg)
+    } catch (error) {
+      return { ...record, status: 'fatal', stage: 'stage', error: String(error?.message ?? error) }
+    }
+    try {
+      // npm, exactly as a profile installs a package: build scripts run by default,
+      // so native modules (better-sqlite3) come out usable. pnpm 11 was tried
+      // here and fights this harness both ways: --ignore-scripts skips builds
+      // without recording them (approve-builds then has nothing to approve),
+      // and its default policy blocks dependency builds AND exits non-zero.
+      await execFile('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+        cwd: bundleDir,
+        env: {
+          ...process.env, CI: '1',
+          npm_config_registry: 'https://registry.npmjs.org',
+        },
+        timeout: 240_000,
+        maxBuffer: 16 * 1024 * 1024,
+      })
+    } catch (error) {
+      return { ...record, status: 'load-failed', stage: 'install', gap: 'dependency-install', error: String(error?.message ?? error).slice(0, 500) }
+    }
+    try {
+      const surface = await loadBundle(bundleDir, { baseline: hostBaseline })
+      return {
+        ...record,
+        status: 'loaded',
+        verdict: report.verdict,
+        tools: surface.tools.filter(name => !name.startsWith('bb-')),
+        commands: surface.commands,
+        skills: surface.skills,
+        ...(surface.exercised === undefined ? {} : { exercised: surface.exercised }),
+        degraded: [...new Set(report.findings.filter(item => item.level === 'unsupported').map(item => item.capability))],
+      }
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      return { ...record, status: 'load-failed', stage: 'load', gap: classifyGap(message), error: message.slice(0, 500) }
+    }
+  } finally {
+    await pkg.dispose()
+  }
+}
+
+// ---- host-surface baseline -------------------------------------------------
+// The bridge itself contributes host-native surface on every mount (today the
+// built-in OAuth /login command — Pi hosts ship those flows out of the box, so
+// pi2dsh does too). A package probe must measure the PACKAGE's increment only,
+// so mount a zero-contribution fixture extension once and subtract everything
+// it exposes. Generic by construction: no hardcoded name list to rot.
+async function computeHostBaseline() {
+  const fixtureDir = join(scratch, 'fixtures', 'pi2dsh-blackbox-baseline')
+  await mkdir(fixtureDir, { recursive: true })
+  await writeFile(join(fixtureDir, 'package.json'), JSON.stringify({
+    name: 'pi2dsh-blackbox-baseline',
+    version: '0.0.0',
+    type: 'module',
+    pi: { extensions: ['index.js'] },
+  }, null, 2))
+  await writeFile(join(fixtureDir, 'index.js'), 'export default function piBlackboxBaseline() {}\n')
+  const pkg = await resolvePiPackage(fixtureDir)
+  try {
+    const bundleDir = join(scratch, 'packages', 'baseline')
+    await cp(pkg.rootDir, bundleDir, { recursive: true })
+    await execFile('npm', ['install', '--omit=dev', '--no-audit', '--no-fund'], {
+      cwd: bundleDir,
+      env: { ...process.env, CI: '1', npm_config_registry: 'https://registry.npmjs.org' },
+      timeout: 240_000,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+    const surface = await loadBundle(bundleDir, { probe: false })
+    return { tools: new Set(surface.tools), commands: new Set(surface.commands) }
+  } finally {
+    await pkg.dispose()
+  }
+}
+
+const hostBaseline = await computeHostBaseline()
+console.error(`[pi2dsh] host-native baseline subtracted from every probe: tools=[${[...hostBaseline.tools].join(', ')}] commands=[${[...hostBaseline.commands].join(', ')}]`)
+
+const selected = corpus.packages.filter(entry => only === undefined || only.has(entry.name))
+const results = []
+for (const entry of selected) {
+  const result = await verifyOne(entry)
+  results.push(result)
+  console.error(`[${result.status.padEnd(11)}] #${String(entry.rank).padStart(2)} ${entry.name}${result.gap === undefined ? '' : ` (${result.gap})`}`)
+}
+
+const counts = {
+  loaded: results.filter(item => item.status === 'loaded').length,
+  loadFailed: results.filter(item => item.status === 'load-failed').length,
+  fatal: results.filter(item => item.status === 'fatal').length,
+}
+const gaps = {}
+for (const item of results) {
+  if (item.status !== 'load-failed') continue
+  gaps[item.gap] = (gaps[item.gap] ?? 0) + 1
+}
+const exerciseCounts = {}
+if (exercise) {
+  for (const item of results) {
+    if (item.status !== 'loaded') continue
+    const grade = item.exercised?.grade ?? 'nothing-exercisable'
+    exerciseCounts[grade] = (exerciseCounts[grade] ?? 0) + 1
+  }
+}
+const value = {
+  schemaVersion: 1,
+  generatedAt: new Date().toISOString(),
+  method: 'convert + real DSH runtime load (Cordis composition with official service plugins); registration surfaces recorded; failures classified as ABI gaps'
+    + (exercise ? '; representative tools/commands EXECUTED with schema-derived arguments against local fixtures' : ''),
+  hostBaseline: { tools: [...hostBaseline.tools], commands: [...hostBaseline.commands] },
+  counts,
+  ...(exercise ? { exerciseCounts } : {}),
+  gapHistogram: gaps,
+  results,
+}
+await writeFile(outputPath, `${JSON.stringify(value, null, 2)}\n`)
+console.log(JSON.stringify({ ...counts, ...(exercise ? { exercise: exerciseCounts } : {}) }))
+console.log(outputPath)
+await new Promise(resolveClose => fixtureServer.close(resolveClose))
+await new Promise(resolveClose => ollamaFixture.close(resolveClose))
+if (process.env.PI2DSH_KEEP_TEST_ARTIFACTS !== '1') await rm(scratch, { recursive: true, force: true })
+// Exercised tools may have spawned children (worker daemons, child `pi`
+// dispatch) whose live handles keep this process from exiting on its own;
+// results are on disk, so exit explicitly.
+process.exit(0)
